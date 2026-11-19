@@ -1,0 +1,9 @@
+node_modules/
+out/
+release/
+*.log
+*.part
+.env
+.env.*
+# Apple's SF Pro can't be redistributed: local builds only
+src/renderer/src/assets/fonts/sf-pro-*

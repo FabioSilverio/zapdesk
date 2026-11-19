@@ -1,0 +1,100 @@
+{
+  "name": "zapdesk",
+  "version": "1.2.13",
+  "description": "Cliente WhatsApp compacto pra Windows",
+  "main": "out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "start": "electron-vite preview",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "icon": "electron scripts/make-icon.cjs",
+    "dist": "electron-vite build && electron-builder --win",
+    "publish-update": "node scripts/publish-update.mjs",
+    "release": "npm version patch --no-git-tag-version && npm run dist && node scripts/publish-update.mjs"
+  },
+  "author": "Fabio Silverio",
+  "license": "UNLICENSED",
+  "type": "module",
+  "dependencies": {
+    "@emoji-mart/data": "^1.2.1",
+    "@fontsource-variable/inter": "^5.3.0",
+    "baileys": "^7.0.0-rc14",
+    "big-integer": "^1.6.52",
+    "emoji-mart": "^5.6.0",
+    "motion": "^12.23.24",
+    "pino": "^9.7.0",
+    "qrcode": "^1.5.4",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "react-virtuoso": "^4.18.23",
+    "telegram": "^2.26.22"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "@types/qrcode": "^1.5.6",
+    "@types/react": "^19.2.2",
+    "@types/react-dom": "^19.2.2",
+    "@vitejs/plugin-react": "^6.3.0",
+    "electron": "^45.3.4",
+    "electron-builder": "^26.0.12",
+    "electron-vite": "^6.0.0",
+    "typescript": "^5.9.3",
+    "vite": "^8.3.8"
+  },
+  "productName": "Zapdesk",
+  "build": {
+    "appId": "com.fabiosilverio.zapdesk",
+    "productName": "Zapdesk",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "out/**",
+      "package.json"
+    ],
+    "npmRebuild": false,
+    "asarUnpack": [
+      "**/*.wasm"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.ico"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "createDesktopShortcut": true,
+      "shortcutName": "Zapdesk",
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico"
+    },
+    "portable": {
+      "artifactName": "Zapdesk-portable.exe"
+    },
+    "extraResources": [
+      {
+        "from": "build/icon.ico",
+        "to": "icon.ico"
+      },
+      {
+        "from": "build/icon.png",
+        "to": "icon.png"
+      }
+    ]
+  }
+}

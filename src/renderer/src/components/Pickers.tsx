@@ -1,8 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
 import { motion } from 'motion/react'
-import data from '@emoji-mart/data'
-import i18n from '@emoji-mart/data/i18n/pt.json'
-import { Picker } from 'emoji-mart'
 import { toast, useStore, zap } from '../state'
 import { showMenu } from './overlays'
 import { Refresh, StickerIcon, X } from './icons'
@@ -10,8 +7,19 @@ import { Refresh, StickerIcon, X } from './icons'
 let handler: ((emoji: string) => void) | null = null
 let cached: { el: HTMLElement; key: string } | null = null
 
-function pickerEl(scheme: string, accent: string) {
+// emoji-mart + its data (~1 MB of JS) load on their own, after boot: opening the app doesn't wait for them
+let lib: Promise<{ data: unknown; i18n: unknown; Picker: new (o: object) => unknown }> | null = null
+const loadLib = () =>
+  (lib ??= Promise.all([import('@emoji-mart/data'), import('@emoji-mart/data/i18n/pt.json'), import('emoji-mart')]).then(([d, t, m]) => ({
+    data: d.default,
+    i18n: t.default,
+    Picker: m.Picker as unknown as new (o: object) => unknown
+  })))
+
+async function pickerEl(scheme: string, accent: string) {
   const key = scheme + accent
+  if (cached?.key === key) return cached.el
+  const { data, i18n, Picker } = await loadLib()
   if (cached?.key === key) return cached.el
   const el = new Picker({
     data,
@@ -37,11 +45,14 @@ function pickerEl(scheme: string, accent: string) {
   return el
 }
 
-/** warm up the picker after boot so the first open is instant */
+/** warm up the picker once the PC is idle after boot, so the first open is instant without slowing startup */
 export function preloadEmoji() {
-  const s = document.documentElement.dataset.scheme ?? 'dark'
-  const accent = getComputedStyle(document.documentElement).getPropertyValue('--accent')
-  setTimeout(() => pickerEl(s, accent), 1500)
+  const go = () => {
+    const s = document.documentElement.dataset.scheme ?? 'dark'
+    const accent = getComputedStyle(document.documentElement).getPropertyValue('--accent')
+    void pickerEl(s, accent).catch(() => {})
+  }
+  setTimeout(() => (typeof requestIdleCallback === 'function' ? requestIdleCallback(go, { timeout: 15000 }) : go()), 5000)
 }
 
 const pop = {
@@ -58,12 +69,18 @@ export function EmojiPopover({ onPick, onClose, style }: { onPick: (e: string) =
     handler = onPick
     const scheme = document.documentElement.dataset.scheme ?? 'dark'
     const accent = getComputedStyle(document.documentElement).getPropertyValue('--accent')
-    const el = pickerEl(scheme, accent)
-    host.current?.appendChild(el)
-    requestAnimationFrame(() => (el.shadowRoot?.querySelector('input') as HTMLInputElement | null)?.focus())
+    let el: HTMLElement | null = null
+    let gone = false
+    void pickerEl(scheme, accent).then((e) => {
+      if (gone) return
+      el = e
+      host.current?.appendChild(e)
+      requestAnimationFrame(() => (e.shadowRoot?.querySelector('input') as HTMLInputElement | null)?.focus())
+    })
     return () => {
+      gone = true
       handler = null
-      el.remove()
+      el?.remove()
     }
   }, [onPick, theme])
   useEffect(() => {

@@ -104,6 +104,7 @@ function AppearanceTab({ a }: { a: Appearance }) {
       <Row label="Vidro (Liquid Glass)" hint="Janela translúcida com o fundo do Windows desfocado atrás e painéis de vidro. Leve: quem desfoca é o próprio Windows">
         <Toggle on={a.glass !== false} onChange={(glass) => setLook({ glass })} />
       </Row>
+      <PerformanceRows />
       <h4>Escala</h4>
       <Row label="Crescer junto com a janela" hint="Arrastou a borda ou maximizou, tudo aumenta proporcionalmente">
         <Toggle on={a.autoScale} onChange={(autoScale) => setLook({ autoScale })} />
@@ -495,5 +496,49 @@ export function SettingsModal() {
         </div>
       </motion.div>
     </motion.div>
+  )
+}
+
+/** Desempenho: lite mode + a diagnostics file to send when something feels slow on another PC */
+function PerformanceRows() {
+  const perf = useStore((st) => st.settings?.performance ?? 'auto')
+  const lowEnd = useStore((st) => st.lowEnd)
+  const [busy, setBusy] = useState(false)
+  return (
+    <>
+      <Row
+        label="Desempenho"
+        hint={
+          perf === 'auto'
+            ? lowEnd
+              ? 'Este PC é mais fraco (ou sem aceleração de vídeo): rodando no modo leve — sem vidro, desfoque e animações'
+              : 'Este PC aguenta tudo: efeitos completos. Num PC fraco o modo leve liga sozinho'
+            : perf === 'leve'
+              ? 'Sem vidro, desfoque e animações; menos downloads e transcrições em segundo plano'
+              : 'Todos os efeitos, mesmo num PC fraco'
+        }
+      >
+        <Seg value={perf} options={[['auto', 'Automático'], ['leve', 'Leve'], ['completo', 'Completo']]} onChange={(performance) => void updateSettings({ performance })} />
+      </Row>
+      <Row label="Diagnóstico" hint="Salva na Área de Trabalho um arquivo com as informações do PC, como o app está rodando e os erros recentes (sem conteúdo de mensagens), pra você mandar">
+        <button
+          className="btn"
+          disabled={busy}
+          onClick={async () => {
+            setBusy(true)
+            try {
+              const f = await zap.exportDiagnostics()
+              if (f) toast('Diagnóstico salvo na Área de Trabalho ✓')
+            } catch {
+              toast('Não deu pra salvar o diagnóstico')
+            } finally {
+              setBusy(false)
+            }
+          }}
+        >
+          Exportar
+        </button>
+      </Row>
+    </>
   )
 }

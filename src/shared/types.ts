@@ -203,6 +203,8 @@ export interface Settings {
   hoverPeek: boolean
   /** transcribe voice notes you receive as soon as they show up (needs the engine downloaded) */
   autoTranscribe: boolean
+  /** leve = no glass/blur/animations, fewer background downloads; auto = leve on a slow PC */
+  performance?: 'auto' | 'leve' | 'completo'
   lockMinutes: number
   notifications: boolean
   notifyPreview: boolean
@@ -243,8 +245,12 @@ export interface UpdateInfo {
   version: string
   notes: string[]
   date: string
-  /** installer path */
+  /** installer path (for a GitHub update: where it gets downloaded) */
   file: string
+  /** comes from the GitHub releases (downloaded on click) */
+  remote?: boolean
+  /** 0-100 while downloading it */
+  progress?: number
 }
 
 export interface InitPayload {
@@ -270,6 +276,8 @@ export interface InitPayload {
   accounts: AccountSummary[]
   /** chat to open right after boot (notification from another account) */
   openChat?: string
+  /** this PC is slow (few cores, little RAM, no GPU acceleration): "auto" performance turns effects down */
+  lowEnd?: boolean
 }
 
 export type MainEvent =
@@ -290,6 +298,7 @@ export type MainEvent =
   | { type: 'accounts'; accounts: AccountSummary[] }
   | { type: 'update'; update: UpdateInfo | null }
   | { type: 'whisper'; whisper: WhisperState }
+  | { type: 'lowEnd'; lowEnd: boolean }
   /** text so far of a long voice note still being transcribed */
   | { type: 'transcript'; chatId: string; msgId: string; text: string }
   /** a voice note arrived in a chat that isn't open (automatic transcription) */
@@ -371,6 +380,12 @@ export interface ZapApi {
   removeAccount(id: string): Promise<void>
   renameAccount(id: string, label: string): Promise<void>
   log(msg: string): void
+  /** a renderer task that blocked the screen this long (ms) */
+  stall(ms: number): void
+  /** this PC + how the app has been performing (diagnostics) */
+  perfStats(): Promise<Record<string, unknown>>
+  /** writes a diagnostics file (PC info, performance, recent errors — no message content) to the Desktop */
+  exportDiagnostics(): Promise<string | null>
   booted(): void
   onEvent(cb: (ev: MainEvent) => void): () => void
 }

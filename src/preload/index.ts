@@ -64,6 +64,9 @@ const api: ZapApi = {
   removeAccount: inv("removeAccount") as ZapApi["removeAccount"],
   renameAccount: inv("renameAccount") as ZapApi["renameAccount"],
   log: (msg) => ipcRenderer.send("log", msg),
+  stall: (ms) => ipcRenderer.send('stall', ms),
+  perfStats: inv('perfStats') as ZapApi['perfStats'],
+  exportDiagnostics: inv('exportDiagnostics') as ZapApi['exportDiagnostics'],
   booted: () => ipcRenderer.send("booted"),
   onEvent: (cb) => {
     const fn = (_e: unknown, ev: MainEvent) => cb(ev)

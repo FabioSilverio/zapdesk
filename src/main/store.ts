@@ -1,6 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
+import { timed } from './perf'
 import { BufferJSON, type WAMessage } from 'baileys'
 import type { Reminder, ScheduledMsg, Settings } from '@shared/types'
 
@@ -137,8 +138,14 @@ export function readJson<T>(file: string, fallback: T): T {
 export function writeAtomic(file: string, data: unknown) {
   const tmp = file + '.tmp'
   fs.writeFileSync(tmp, JSON.stringify(data, BufferJSON.replacer))
+  // the previous version becomes the .bak by renaming (instant), not by copying it (a big group is ~8 MB:
+  // copying it on every new message doubled the disk work, painful on HDDs). A crash between the two
+  // renames leaves .bak + .tmp, and readJson falls back to .bak.
   try {
-    if (fs.existsSync(file)) fs.copyFileSync(file, file + '.bak')
+    if (fs.existsSync(file)) {
+      fs.rmSync(file + '.bak', { force: true })
+      fs.renameSync(file, file + '.bak')
+    }
   } catch {}
   fs.renameSync(tmp, file)
 }
@@ -225,9 +232,8 @@ export class Store {
   bucket(chatId: string): Bucket {
     let b = this.buckets.get(chatId)
     if (!b) {
-      const raw = readJson<{ m: WAMessage[]; r: Record<string, Record<string, string>> }>(
-        path.join(this.dir, 'msgs', safeName(chatId) + '.json'),
-        { m: [], r: {} }
+      const raw = timed('read chat', () =>
+        readJson<{ m: WAMessage[]; r: Record<string, Record<string, string>> }>(path.join(this.dir, 'msgs', safeName(chatId) + '.json'), { m: [], r: {} })
       )
       b = { msgs: new Map(), reactions: new Map(Object.entries(raw.r ?? {})), touched: Date.now() }
       for (const m of raw.m ?? []) if (m.key?.id) b.msgs.set(m.key.id, m)
@@ -297,6 +303,7 @@ export class Store {
     this.timer = setTimeout(() => this.flush(false), 1500)
   }
 
+  private writtenAt = new Map<string, number>()
   private disposed = false
   /** stop writing (account being removed) */
   dispose() {
@@ -315,11 +322,24 @@ export class Store {
     if (this.disposed) return
     try {
       let budget = all ? Infinity : 6
+      const now = Date.now()
+      let deferred = false
       for (const chatId of [...this.dirtyChats]) {
-        if (budget-- <= 0) break
-        this.dirtyChats.delete(chatId)
+        if (budget <= 0) break
         const b = this.buckets.get(chatId)
-        if (!b) continue
+        if (!b) {
+          this.dirtyChats.delete(chatId)
+          continue
+        }
+        // a busy big group rewrote its whole file (several MB) after every message: at most every 8 s
+        // now (quitting/switching writes everything; what's in memory is never lost while the app runs)
+        if (!all && b.msgs.size > 800 && now - (this.writtenAt.get(chatId) ?? 0) < 8000) {
+          deferred = true
+          continue
+        }
+        budget--
+        this.dirtyChats.delete(chatId)
+        this.writtenAt.set(chatId, now)
         let list = this.sorted(chatId)
         if (list.length > MAX_PER_CHAT) {
           list = list.slice(-MAX_PER_CHAT)
@@ -327,18 +347,22 @@ export class Store {
           b.sorted = list
         }
         try {
-          writeAtomic(path.join(this.dir, 'msgs', safeName(chatId) + '.json'), {
-            m: list,
-            r: Object.fromEntries(b.reactions)
-          })
+          timed('write chat ' + list.length, () =>
+            writeAtomic(path.join(this.dir, 'msgs', safeName(chatId) + '.json'), {
+              m: list,
+              r: Object.fromEntries(b.reactions)
+            })
+          )
         } catch (err) {
           console.error('[store] chat write failed', chatId, (err as Error).message)
         }
       }
-      if (this.dirtyChats.size) this.timer = setTimeout(() => this.flush(false), 60)
+      if (this.dirtyChats.size) this.timer = setTimeout(() => this.flush(false), deferred && budget > 0 ? 2000 : 60)
       if (this.dirtyList) {
-        writeAtomic(path.join(this.dir, 'chats.json'), [...this.chats.values()])
-        writeAtomic(path.join(this.dir, 'contacts.json'), [...this.contacts.values()])
+        timed('write list', () => {
+          writeAtomic(path.join(this.dir, 'chats.json'), [...this.chats.values()])
+          writeAtomic(path.join(this.dir, 'contacts.json'), [...this.contacts.values()])
+        })
         this.dirtyList = false
       }
       if (this.dirtyMeta) {

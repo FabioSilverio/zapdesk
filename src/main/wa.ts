@@ -764,8 +764,8 @@ export class WaService implements ChatService {
   private async resyncArchives(sock: WASocket) {
     const done = new Set(this.store.meta.migrations ?? [])
     const need: ('regular_low' | 'regular_high')[] = []
-    if (!done.has('archive-resync-v1')) need.push('regular_low')
-    if (!done.has('mute-resync-v1')) need.push('regular_high')
+    if (!done.has('archive-resync-v2')) need.push('regular_low')
+    if (!done.has('mute-resync-v2')) need.push('regular_high')
     if (!need.length) return
     await new Promise((r) => setTimeout(r, 8000))
     if (sock !== this.sock || this.conn !== 'open') return
@@ -774,8 +774,8 @@ export class WaService implements ChatService {
       // forget the saved version → WhatsApp sends the full snapshot again (archive+pins in regular_low, mutes in regular_high)
       await keys?.set({ 'app-state-sync-version': Object.fromEntries(need.map((n) => [n, null])) })
       await sock.resyncAppState(need, true)
-      if (need.includes('regular_low')) done.add('archive-resync-v1')
-      if (need.includes('regular_high')) done.add('mute-resync-v1')
+      if (need.includes('regular_low')) done.add('archive-resync-v2')
+      if (need.includes('regular_high')) done.add('mute-resync-v2')
       this.store.meta.migrations = [...done]
       this.store.markMeta()
     } catch (err) {
@@ -800,10 +800,23 @@ export class WaService implements ChatService {
       } else if (history) rec.unread = c.unreadCount
     }
     const conditional = !!(c as any).conditional
+    // History chats are decoded protobuf objects: pinned/archived/muteEndTime exist on the PROTOTYPE as null
+    // even when the phone said nothing, so `'pinned' in c` used to unpin (and unmute) every chat of every
+    // history batch — a new install, or just scrolling up in a chat. History may only turn things ON;
+    // turning them off comes from real app-state actions (live chats.update, own properties).
+    const own = (k: string) => Object.prototype.hasOwnProperty.call(c, k)
     // conditional flags from initial app-state sync are handled via pending* in flushArchive()
-    if ('pinned' in c && !conditional) rec.waPinned = c.pinned ? Number(c.pinned) : undefined
-    if ('archived' in c && c.archived != null && !conditional) rec.archived = !!c.archived || undefined
-    if ('muteEndTime' in c && !conditional) rec.muteUntil = parseMute(c.muteEndTime, fromUpdate)
+    if (!conditional) {
+      if (history) {
+        if (c.pinned) rec.waPinned = Number(c.pinned)
+        if (c.archived) rec.archived = true
+        if (c.muteEndTime) rec.muteUntil = parseMute(c.muteEndTime, fromUpdate)
+      } else {
+        if (own('pinned')) rec.waPinned = c.pinned ? Number(c.pinned) : undefined
+        if (own('archived') && c.archived != null) rec.archived = !!c.archived || undefined
+        if (own('muteEndTime')) rec.muteUntil = parseMute(c.muteEndTime, fromUpdate)
+      }
+    }
     if (c.conversationTimestamp) rec.ts = Math.max(rec.ts, Number(c.conversationTimestamp) * 1000)
     if ((c as any).markedAsUnread) rec.markedUnread = true
     this.queueChat(id)
@@ -890,6 +903,9 @@ export class WaService implements ChatService {
     })
     this.sock = sock
     ;(sock as any)._authState = state
+    // WhatsApp's own clock at login: a PC whose clock is off stamped what you sent in the past/future and it
+    // landed above the messages you were answering (received ones carry the server's time)
+    ;(sock.ws as any).on?.('CB:success', (node: any) => this.setServerTime(Number(node?.attrs?.t)))
     // Archive/mute/pin flags of the first app-state sync (and resyncs) come as "conditional" chat updates that
     // Baileys keeps buffered forever when the chat isn't in the same history batch. Catch them at the source.
     const rawEmit = sock.ev.emit.bind(sock.ev)
@@ -1313,11 +1329,39 @@ export class WaService implements ChatService {
     return this.sock
   }
 
+  /** server time − this PC's clock (ms) */
+  private clockOffset = 0
+  private clockWarned = false
+  private setServerTime(t: number) {
+    if (!Number.isFinite(t) || t <= 0) return
+    this.clockOffset = t * 1000 - Date.now()
+    const min = Math.round(this.clockOffset / 60_000)
+    if (Math.abs(this.clockOffset) > 2 * 60_000) {
+      logError('clock', new Error(`PC clock is off by ${-min} min (server ${new Date(t * 1000).toISOString()})`))
+      if (!this.clockWarned) {
+        this.clockWarned = true
+        const how = Math.abs(min) >= 120 ? Math.round(Math.abs(min) / 60) + ' h' : Math.abs(min) + ' min'
+        this.emit({
+          type: 'toast',
+          text: `O relógio deste PC está ${how} ${min > 0 ? 'atrasado' : 'adiantado'}. O Zapdesk corrige a hora das suas mensagens, mas acerte em Configurações do Windows → Hora → Sincronizar agora.`
+        })
+      }
+    }
+  }
+
+  /** when a message you send is stamped: WhatsApp's time, never before the last message in the chat */
+  private sendStamp(chatId: string) {
+    let at = Date.now() + this.clockOffset
+    const last = this.store.chats.get(chatId)?.ts ?? 0
+    if (last && last >= at && last - at < 6 * 3600_000) at = last + 1000
+    return new Date(at)
+  }
+
   private async sendContent(chatId: string, content: AnyMessageContent, quotedId?: string) {
     const sock = this.requireOpen()
     const quoted = quotedId ? this.store.getMessage(chatId, quotedId) : undefined
     const target = await this.resolveTarget(chatId)
-    const sent = await sock.sendMessage(target, content, quoted ? { quoted } : undefined)
+    const sent = await sock.sendMessage(target, content, { ...(quoted ? { quoted } : {}), timestamp: this.sendStamp(chatId) } as any)
     if (sent) this.ingest(markSent(sent), true)
   }
 
@@ -1329,7 +1373,8 @@ export class WaService implements ChatService {
     const text = c?.conversation ?? c?.extendedTextMessage?.text
     const sock = this.requireOpen()
     const target = await this.resolveTarget(chatId)
-    const sent = text ? await sock.sendMessage(target, { text }) : await sock.sendMessage(target, { forward: m } as AnyMessageContent)
+    const stamp = { timestamp: this.sendStamp(chatId) } as any
+    const sent = text ? await sock.sendMessage(target, { text }, stamp) : await sock.sendMessage(target, { forward: m } as AnyMessageContent, stamp)
     if (sent) this.ingest(markSent(sent), true)
     const b = this.store.bucket(chatId)
     b.msgs.delete(msgId)

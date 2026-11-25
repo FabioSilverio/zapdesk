@@ -229,3 +229,41 @@ export function seedTgDemo(store: Store) {
   rec('tg:103', 40, false, 'I can help you create and manage Telegram bots.', 200000)
   rec('tg:-1003', 50, false, 'Almoço domingo na vó 🍝', 40000, { sender: 'tg:204', senderName: 'Mãe' })
 }
+
+/**
+ * ZAP_HEAVY: an account the size of a real busy one (600 chats, 3000 contacts, 3 groups with 4000 messages,
+ * 60 chats with 300) written to disk and unloaded, so opening chats reads files like the real app does.
+ */
+export function seedHeavy(store: Store) {
+  const words = 'oi tudo bem amanhã reunião projeto cliente relatório entrega valor proposta ok beleza combinado foto vídeo áudio link prazo semana hoje depois agora'.split(' ')
+  const say = (i: number) => Array.from({ length: 4 + (i % 14) }, (_, k) => words[(i * 7 + k * 3) % words.length]).join(' ')
+  const people = Array.from({ length: 3000 }, (_, i) => `55119${String(10000000 + i).slice(-8)}@s.whatsapp.net`)
+  people.forEach((jid, i) => store.contacts.set(jid, { id: jid, name: 'Contato ' + (i + 1) }))
+  for (let c = 0; c < 600; c++) {
+    const group = c % 4 === 0
+    const jid = group ? `1203630${String(9000000000 + c)}@g.us` : people[c]
+    const count = c < 3 ? 4000 : c < 63 ? 300 : 12
+    const ts = NOW - c * 600
+    store.chats.set(jid, { id: jid, name: group ? 'Grupo grande ' + (c + 1) : undefined, ts: ts * 1000, unread: c % 9 === 0 ? (c % 5) + 1 : 0, preview: say(c), lastMsgId: undefined })
+    for (let i = 0; i < count; i++) {
+      const from = people[(c * 31 + i) % people.length]
+      const m = msg(jid, i % 6 === 0, say(c + i), (count - i) * 45 + c * 600, {}, group ? from : undefined, 'Contato')
+      store.putMessage(jid, m)
+    }
+  }
+  store.markList()
+  store.flush(true)
+  store.buckets.clear()
+}
+
+/** ZAP_HEAVY_LIVE: a busy afternoon — a message every 400 ms, mostly into the biggest groups */
+export function heavyLive(ingest: (m: WAMessage, live: boolean) => void, ms = 30_000) {
+  const groups = Array.from({ length: 3 }, (_, c) => `1203630${String(9000000000 + c * 4)}@g.us`)
+  let i = 0
+  const t = setInterval(() => {
+    const chat = i % 5 === 4 ? `55119${String(10000000 + (i % 590) + 5).slice(-8)}@s.whatsapp.net` : groups[i % 3]
+    ingest(msg(chat, false, 'mensagem ao vivo ' + i, 0, {}, chat.endsWith('@g.us') ? `55119${String(10000000 + (i % 3000)).slice(-8)}@s.whatsapp.net` : undefined, 'Contato'), true)
+    i++
+  }, 400)
+  setTimeout(() => clearInterval(t), ms)
+}

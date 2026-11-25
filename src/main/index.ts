@@ -1,5 +1,6 @@
 import fs from 'node:fs'
 import { randomBytes } from 'node:crypto'
+import { isLowEnd, perfSnapshot, rendererStall, startPerfLog, systemInfo } from './perf'
 import path from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { Readable } from 'node:stream'
@@ -27,9 +28,9 @@ import type { TgFile } from './tgfile'
 import type { ChatService } from './service'
 import { AccountList, AppConfig, type AccountInfo, type AppMeta } from './accounts'
 import { LockManager } from './lock'
-import { demoLive, seedDemo, seedTgDemo } from './demo'
+import { demoLive, heavyLive, seedDemo, seedHeavy, seedTgDemo } from './demo'
 import { getLinkMeta, initLinkCache } from './links'
-import { readUpdate, runInstaller, watchUpdates } from './updater'
+import { checkGitHub, currentUpdate, downloadRemote, runInstaller, watchUpdates } from './updater'
 import { Transcriber } from './transcribe'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
@@ -252,6 +253,8 @@ for (const a of live.values()) a.wa.screenLocked = lock.locked
 if (DEMO) {
   if (wa.kind === 'tg') seedTgDemo(store)
   else seedDemo(store)
+  if (process.env.ZAP_HEAVY && wa.kind !== 'tg') seedHeavy(store)
+  if (process.env.ZAP_SETTINGS) config.meta.settings = { ...config.meta.settings, ...JSON.parse(process.env.ZAP_SETTINGS) }
   if (process.env.ZAP_LOOK) config.meta.settings.appearance = { ...config.meta.settings.appearance, ...JSON.parse(process.env.ZAP_LOOK) }
   if (!lock.hasPin()) lock.setPin('1234')
   if (process.env.ZAP_LOCK) lock.lock()
@@ -344,6 +347,27 @@ function createWindow(show: boolean) {
     if (show) win?.show()
   })
   win.webContents.on('did-finish-load', applyZoom)
+  // dev-only: emulate a slower PC for the renderer (ZAP_CPU_THROTTLE=4 → 4x slower JS/layout)
+  if (process.env.ZAP_CPU_THROTTLE)
+    win.webContents.once('did-finish-load', () => {
+      try {
+        win!.webContents.debugger.attach('1.3')
+        void win!.webContents.debugger.sendCommand('Emulation.setCPUThrottlingRate', { rate: Number(process.env.ZAP_CPU_THROTTLE) || 4 })
+        // dev-only: ZAP_PROFILE=<file.json> records the renderer's first seconds as a CPU profile
+        const out = process.env.ZAP_PROFILE
+        if (out) {
+          const dbg = win!.webContents.debugger
+          void dbg
+            .sendCommand('Profiler.enable')
+            .then(() => dbg.sendCommand('Profiler.setSamplingInterval', { interval: 200 }))
+            .then(() => dbg.sendCommand('Profiler.start'))
+            .then(() => new Promise((r) => setTimeout(r, Number(process.env.ZAP_PROFILE_MS) || 4000)))
+            .then(() => dbg.sendCommand('Profiler.stop'))
+            .then((r: any) => fs.writeFileSync(out, JSON.stringify(r.profile)))
+            .catch((e) => log('profile', e))
+        }
+      } catch {}
+    })
   win.on('resize', scheduleZoom)
   win.on('maximize', applyZoom)
   win.on('unmaximize', applyZoom)
@@ -627,7 +651,7 @@ function prefetchMedia(chatId: string, msgId: string, urgent: boolean) {
   pumpPrefetch()
 }
 function pumpPrefetch() {
-  while (prefetching < 3 && prefetchQ.length) {
+  while (prefetching < (liteMode() ? 1 : 3) && prefetchQ.length) {
     const j = prefetchQ.shift()!
     // the account on screen changed: its downloads wait for the next time it's opened
     if (j.owner !== wa) {
@@ -743,7 +767,8 @@ function registerIpc() {
     scheduled: store.meta.scheduled,
     reminders: store.meta.reminders,
     accounts: accountSummaries(),
-    openChat: pendingOpen
+    openChat: pendingOpen,
+    lowEnd
   }))
   ipcMain.on('booted', () => {
     pendingOpen = undefined
@@ -766,6 +791,33 @@ function registerIpc() {
     pushSummaries()
   })
   ipcMain.on('log', (_e, msg: string) => log('renderer', new Error(String(msg).slice(0, 4000))))
+  // renderer frames that took too long (PerformanceObserver longtask), summed into the perf log
+  ipcMain.on('stall', (_e, ms: number) => rendererStall(Number(ms) || 0))
+  ipcMain.handle('perfStats', () => ({ system: systemInfo(), lowEnd: isLowEnd(), ...perfSnapshot() }))
+  ipcMain.handle('exportDiagnostics', () => {
+    const s = config.meta.settings
+    const lines = [
+      'Zapdesk — diagnóstico (' + new Date().toLocaleString('pt-BR') + ')',
+      '',
+      'PC: ' + JSON.stringify({ ...systemInfo(), lowEnd: isLowEnd() }, null, 1),
+      '',
+      'Desempenho: ' + JSON.stringify(perfSnapshot(), null, 1),
+      '',
+      'Contas: ' + JSON.stringify([...live.values()].map((a) => ({ kind: a.info.kind ?? 'wa', conn: a.wa.conn, chats: a.store.chats.size, loaded: a.store.buckets.size }))),
+      'Ajustes: ' + JSON.stringify({ performance: s.performance ?? 'auto', glass: s.appearance.glass, font: s.appearance.font, autoTranscribe: s.autoTranscribe, hoverPeek: s.hoverPeek, zoom: s.appearance.zoom, autoScale: s.appearance.autoScale }),
+      '',
+      '--- log (últimas linhas) ---'
+    ]
+    let tail = ''
+    try {
+      tail = fs.readFileSync(logFile, 'utf8').split(/\r?\n/).slice(-400).join('\r\n')
+    } catch {}
+    const file = path.join(app.getPath('desktop'), `Zapdesk-diagnostico-${new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-')}.txt`)
+    // BOM so Notepad on any Windows reads the accents right
+    fs.writeFileSync(file, '﻿' + lines.join('\r\n') + '\r\n' + tail)
+    shell.showItemInFolder(file)
+    return file
+  })
   ipcMain.handle('messages', (_e, chatId: string, beforeTs?: number) => wa.getMessages(chatId, beforeTs))
   ipcMain.handle('shared', (_e, chatId: string) => wa.getShared(chatId))
   ipcMain.handle('whisperInstall', () => void whisper().install())
@@ -780,13 +832,29 @@ function registerIpc() {
     owner.setTranscript(msgId, text, chatId)
     return text
   })
-  ipcMain.handle('checkUpdate', () => {
-    pendingUpdate = readUpdate()
+  ipcMain.handle('checkUpdate', async () => {
+    await checkGitHub()
+    pendingUpdate = currentUpdate()
     return pendingUpdate
   })
-  ipcMain.handle('installUpdate', () => {
-    const u = readUpdate()
+  ipcMain.handle('installUpdate', async () => {
+    const u = currentUpdate()
     if (!u) return false
+    if (u.remote) {
+      // from GitHub: download first (the button shows the %), then the same silent install
+      log('update', 'downloading ' + u.version)
+      try {
+        await downloadRemote((progress) => send({ type: 'update', update: { ...u, progress } }))
+      } catch (err) {
+        log('update', err)
+        send({ type: 'update', update: u })
+        throw new Error('Não deu pra baixar a atualização. Tente de novo em instantes.')
+      }
+      if (process.env.ZAP_UPDATE_NOINSTALL) {
+        log('update', 'downloaded ' + u.file + ' (not installing: test)')
+        return true
+      }
+    }
     log('update', 'installing ' + u.version)
     config.flush()
     runInstaller(u)
@@ -974,7 +1042,23 @@ app.on('window-all-closed', () => {
   if (!config.meta.settings.closeToTray) app.quit()
 })
 
+/** slow-PC verdict: CPU/RAM right away, the GPU part once Chromium's GPU process has started */
+let lowEnd = isLowEnd(false)
+function liteMode() {
+  const p = config.meta.settings.performance ?? 'auto'
+  return p === 'leve' || (p === 'auto' && lowEnd)
+}
+
 app.whenReady().then(() => {
+  setTimeout(() => {
+    const full = isLowEnd(true)
+    if (full !== lowEnd) {
+      lowEnd = full
+      send({ type: 'lowEnd', lowEnd })
+    }
+  }, 6000)
+  // after the GPU process is up (earlier it reports "software" for everything)
+  setTimeout(() => startPerfLog(log, () => ({ accounts: live.size, chats: store?.chats.size ?? 0, loadedChats: store?.buckets.size ?? 0 })), 8000)
   Menu.setApplicationMenu(null)
   registerProtocol()
   registerIpc()
@@ -1001,7 +1085,27 @@ app.whenReady().then(() => {
     wa.me = { id: '5511999999999@s.whatsapp.net', name: 'Fabio Silverio' }
     ;(wa as any).blocked.add('5511900000003@s.whatsapp.net')
     ;(wa as any).fixSelfChat()
+    if (process.env.ZAP_HEAVY_LIVE) win!.webContents.once('did-finish-load', () => setTimeout(() => heavyLive((m, live) => (wa as any).ingest(m, live)), 6000))
     if (process.env.ZAP_LIVE) win!.webContents.once('did-finish-load', () => demoLive((m, live) => (wa as any).ingest(m, live), (wa as any).store?.dir))
+    // dev-only (ZAP_SYNCTEST): a history batch whose chats carry the protobuf defaults (pinned/mute = null)
+    // must not unpin/unmute; then a PC clock 10 min behind WhatsApp's
+    if (process.env.ZAP_SYNCTEST)
+      setTimeout(async () => {
+        const w = wa as any
+        const { proto } = await import('baileys')
+        const id = '5511900000005@s.whatsapp.net'
+        const rec = w.store.chats.get(id)
+        rec.waPinned = 1700000000
+        rec.muteUntil = Date.now() + 3600_000
+        const conv = proto.Conversation.decode(proto.Conversation.encode({ id }).finish())
+        await w.handleEvents({ 'messaging-history.set': { chats: [conv], contacts: [], messages: [], isLatest: false, progress: 50 } }, w.sock)
+        log('synctest', `after history: pinned=${!!rec.waPinned} muted=${!!rec.muteUntil}`)
+        await w.handleEvents({ 'chats.update': [{ id, pinned: null }] }, w.sock)
+        log('synctest', `after real unpin: pinned=${!!rec.waPinned}`)
+        w.setServerTime(Math.floor((Date.now() + 10 * 60_000) / 1000))
+        const stamp = w.sendStamp('120363000000000001@g.us').getTime()
+        log('synctest', `clock offset=${Math.round(w.clockOffset / 1000)}s stampAhead=${Math.round((stamp - Date.now()) / 1000)}s`)
+      }, 3000)
     // dev-only: group receipts for one of your messages (ZAP_GROUPTEST): stuck "pending" → delivered → read by all
     if (process.env.ZAP_GROUPTEST)
       setTimeout(() => {

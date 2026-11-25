@@ -150,7 +150,9 @@ function readableOn(hex: string) {
 }
 
 let lastChrome = ''
-export function applyAppearance(a: Appearance) {
+export function applyAppearance(a: Appearance, lite = false) {
+  // lite mode: no acrylic window and no blur (the costliest thing on a PC without GPU acceleration)
+  const glass = a.glass !== false && !lite
   const t = themeOf(a.theme)
   const accent = a.accent ?? t.accent
   const root = document.documentElement
@@ -168,10 +170,11 @@ export function applyAppearance(a: Appearance) {
   root.dataset.messages = a.messages
   root.dataset.pinned = a.pinned
   root.dataset.radius = a.radius
-  root.dataset.glass = a.glass !== false ? '1' : ''
-  const chrome = t.tokens['bg-side'] + t.tokens['text-2'] + (a.glass !== false) + t.scheme
+  root.dataset.glass = glass ? '1' : ''
+  root.dataset.lite = lite ? '1' : ''
+  const chrome = t.tokens['bg-side'] + t.tokens['text-2'] + glass + t.scheme
   if (chrome !== lastChrome) {
     lastChrome = chrome
-    zap.setChrome(t.tokens['bg-side'], t.tokens['text-2'], a.glass !== false, t.scheme)
+    zap.setChrome(t.tokens['bg-side'], t.tokens['text-2'], glass, t.scheme)
   }
 }

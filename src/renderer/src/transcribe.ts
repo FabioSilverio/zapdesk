@@ -2,7 +2,7 @@
 // hand the PCM to the main process (whisper.cpp), keep results per message.
 import { useSyncExternalStore } from 'react'
 import type { UiMessage } from '@shared/types'
-import { getState, toast, zap } from './state'
+import { getState, isLite, toast, zap } from './state'
 import { askConfirm } from './components/overlays'
 
 /** partial: what a long note says so far, while it's still being transcribed */
@@ -145,7 +145,8 @@ export function watchTranscripts() {
     }
     if (ev.type !== 'msgs' && ev.type !== 'voiceIn') return
     const st = getState()
-    if (!st.settings?.autoTranscribe || !st.whisper.ready) return
+    // lite mode: whisper eats the CPU of a slow PC — only the ones you click
+    if (!st.settings?.autoTranscribe || !st.whisper.ready || isLite(st)) return
     const now = Date.now()
     for (const m of ev.type === 'msgs' ? ev.messages : [ev.message])
       if (isVoice(m) && !m.fromMe && m.transcript === undefined && now - m.ts < 10 * 60_000 && !entries.has(key(m))) void transcribeMsg(m, true)

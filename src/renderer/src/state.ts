@@ -47,6 +47,8 @@ export interface State {
   version: string
   update: UpdateInfo | null
   whisper: WhisperState
+  /** slow PC (from main): "auto" performance means lite mode */
+  lowEnd: boolean
   folders: Folder[]
   /** Telegram folder tab on screen (null = all chats) */
   folder: number | null
@@ -75,6 +77,7 @@ let state: State = {
   accounts: [],
   version: '',
   update: null,
+  lowEnd: false,
   whisper: { ready: false, progress: null },
   folders: [],
   folder: null
@@ -268,6 +271,9 @@ export function handleEvent(ev: MainEvent) {
     case 'update':
       setState({ update: ev.update })
       break
+    case 'lowEnd':
+      setState({ lowEnd: ev.lowEnd })
+      break
     case 'whisper':
       setState({ whisper: ev.whisper })
       break
@@ -305,10 +311,12 @@ export async function boot() {
     version: init.version ?? '',
     update: init.update ?? null,
     whisper: init.whisper ?? { ready: false, progress: null },
+    lowEnd: !!init.lowEnd,
     folders: init.folders ?? [],
     passwordHint: init.passwordHint,
     loginError: init.loginError
   })
+  performance.mark('booted')
   zap.booted()
   if (init.openChat) void openChat(init.openChat)
 }
@@ -343,3 +351,7 @@ export function flatOrder(s: State): string[] {
   const o = orderedChats(s)
   return [...o.pinned, ...o.groups.flatMap((g) => g.chats)].map((c) => c.id)
 }
+
+/** lite mode: no glass/blur/animations and fewer background jobs — on a slow PC (auto) or when chosen */
+export const isLite = (s: { settings?: { performance?: string } | null; lowEnd: boolean }) =>
+  s.settings?.performance === 'leve' || (s.settings?.performance !== 'completo' && s.lowEnd)

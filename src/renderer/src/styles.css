@@ -509,10 +509,6 @@ kbd {
   overflow-x: hidden;
   padding-bottom: 6px;
 }
-.chat-list > .chat-row {
-  content-visibility: auto;
-  contain-intrinsic-size: auto 52px;
-}
 .section-head {
   padding: 14px 16px 5px;
   font-size: 12px;
@@ -529,9 +525,12 @@ kbd {
   margin: 2px 0 4px;
 }
 .arch-section.open {
-  padding-bottom: 6px;
-  margin-bottom: 6px;
-  border-bottom: 1px solid var(--line);
+  padding-bottom: 2px;
+}
+.arch-end {
+  height: 1px;
+  margin: 4px 0 8px;
+  background: var(--line);
 }
 .arch-bar {
   display: flex;
@@ -826,6 +825,12 @@ kbd {
 }
 .msg {
   display: flex;
+}
+/* messages off screen skip layout/paint until you scroll to them (a 60-message page used to be laid out
+   whole on every update); "auto" remembers each one's real height so nothing jumps */
+.msg-scroller .msg {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 56px;
 }
 .msg.out {
   justify-content: flex-end;
@@ -4035,4 +4040,22 @@ a.link.named:hover {
   white-space: pre-wrap;
   max-height: 90px;
   overflow-y: auto;
+}
+
+/* ---------- lite mode (slow PC / no GPU acceleration) ---------- */
+/* blur behind surfaces is redrawn on every frame without a GPU: gone; big soft shadows too */
+:root[data-lite='1'] *,
+:root[data-lite='1'] *::before,
+:root[data-lite='1'] *::after {
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+}
+:root[data-lite='1'] {
+  --shadow: 0 2px 8px rgb(0 0 0 / 0.25);
+}
+
+.update-pct {
+  font-size: 10px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
 }

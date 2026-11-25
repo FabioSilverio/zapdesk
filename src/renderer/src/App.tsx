@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { AnimatePresence, MotionConfig, motion } from 'motion/react'
-import { boot, flatOrder, getState, openChat, setState, toast, useStore, zap } from './state'
+import { boot, flatOrder, getState, openChat, setState, toast, useStore, zap, isLite } from './state'
 import { applyAppearance } from './themes'
 import { Sidebar } from './components/Sidebar'
 import { ChatView } from './components/ChatView'
@@ -81,6 +81,7 @@ export function App() {
   const locked = useStore((s) => s.locked)
   const hasPin = useStore((s) => s.hasPin)
   const appearance = useStore((s) => s.settings?.appearance)
+  const lite = useStore(isLite)
   // asked once, on a brand-new install; stays open (live preview) until "Pronto"
   const [fontAsk, setFontAsk] = useState(false)
   const fontAsked = useRef(false)
@@ -101,8 +102,8 @@ export function App() {
   }, [])
 
   useEffect(() => {
-    if (appearance) applyAppearance(appearance)
-  }, [appearance])
+    if (appearance) applyAppearance(appearance, lite)
+  }, [appearance, lite])
 
   // transcription engine finished (or failed) downloading: run / release the voice notes that were waiting
   const whisperReady = useStore((s) => s.whisper.ready)
@@ -233,7 +234,7 @@ export function App() {
   const covered = locked || needPin
 
   return (
-    <MotionConfig reducedMotion="user">
+    <MotionConfig reducedMotion={lite ? 'always' : 'user'}>
       <div className={'app' + (locked ? ' is-locked' : '')} inert={covered}>
         {needLogin ? (
           <Login />

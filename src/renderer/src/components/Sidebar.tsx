@@ -1,5 +1,6 @@
 import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import { AnimatePresence, motion, useAnimationControls } from 'motion/react'
+import { Virtuoso } from 'react-virtuoso'
 import type { UiChat } from '@shared/types'
 import { getState, openChat, openChatMedia, orderedChats, setState, toast, useStore, zap } from '../state'
 import { colorOf, initials, listTime } from '../format'
@@ -8,7 +9,7 @@ import { HoverPeek, peekEnter, peekLeave } from './HoverPeek'
 import { askConfirm, askText, showMenu, type MenuItem } from './overlays'
 import { DownloadIcon, PlaneIcon, Archive, Bell, BellOff, BlockIcon, Check, Chevron, ExportIcon, Gear, Ghost, LockIcon, PhotoIcon, PinIcon, Plus, Search, Trash, X } from './icons'
 
-type Row = { kind: 'pinned'; chats: UiChat[] } | { kind: 'head'; label: string } | { kind: 'chat'; chat: UiChat; n?: number } | { kind: 'arch'; chats: UiChat[]; open: boolean }
+type Row = { kind: 'pinned'; chats: UiChat[] } | { kind: 'head'; label: string } | { kind: 'chat'; chat: UiChat; n?: number } | { kind: 'arch'; chats: UiChat[]; open: boolean } | { kind: 'archEnd' }
 
 export function chatMenu(chat: UiChat): MenuItem[] {
   const sections = getState().settings?.sections ?? []
@@ -115,9 +116,14 @@ export async function installUpdate() {
     'Atualizar agora'
   )
   if (!ok) return
-  toast('Atualizando… o Zapdesk volta já já')
-  const started = await zap.installUpdate().catch(() => false)
-  if (!started) toast('Não achei o instalador da atualização')
+  toast(u.remote ? 'Baixando a atualização… (o botão mostra o progresso)' : 'Atualizando… o Zapdesk volta já já')
+  try {
+    const started = await zap.installUpdate()
+    if (!started) toast('Não achei o instalador da atualização')
+    else if (u.remote) toast('Instalando… o Zapdesk volta já já')
+  } catch (e) {
+    toast(errText(e))
+  }
 }
 
 function UpdateButton() {
@@ -128,15 +134,21 @@ function UpdateButton() {
         <motion.button
           key="upd"
           className="icon-btn update-btn"
-          title={`Atualização ${update.version} disponível — clique pra instalar`}
-          onClick={() => void installUpdate()}
+          title={update.progress != null ? `Baixando ${update.version}… ${update.progress}%` : `Atualização ${update.version} disponível — clique pra instalar`}
+          onClick={() => update.progress == null && void installUpdate()}
           initial={{ opacity: 0, y: 6 }}
           animate={{ opacity: 1, y: 0 }}
           exit={{ opacity: 0 }}
           transition={{ type: 'spring', stiffness: 500, damping: 32 }}
         >
-          <DownloadIcon size={17} />
-          <i className="update-dot" />
+          {update.progress != null ? (
+            <span className="update-pct">{update.progress}%</span>
+          ) : (
+            <>
+              <DownloadIcon size={17} />
+              <i className="update-dot" />
+            </>
+          )}
         </motion.button>
       )}
     </AnimatePresence>
@@ -490,6 +502,11 @@ export function Sidebar() {
     let n = o.pinned.length
     if (o.archived.length) {
       rows.push({ kind: 'arch', chats: o.archived, open: showArchived })
+      // flat rows (not nested in the bar): the list only draws what's on screen, archived included
+      if (showArchived) {
+        for (const chat of o.archived) rows.push({ kind: 'chat', chat })
+        rows.push({ kind: 'archEnd' })
+      }
     }
     if (pinnedStyle === 'lista' && o.pinned.length) {
       rows.push({ kind: 'pinned', chats: o.pinned })
@@ -510,6 +527,47 @@ export function Sidebar() {
     const t = typingMap[id]
     return t && t.until > now ? (t.who ?? true) : undefined
   }
+
+  const renderRow = (r: Row) =>
+    r.kind === 'pinned' ? (
+      <div className="pinned-section">
+        <div className="section-head pinned-head" onContextMenu={(e) => showMenu(e, bulk(() => r.chats, 'as fixadas'))}>
+          <PinIcon size={12} /> fixadas
+        </div>
+        {r.chats.map((chat, i) => (
+          <ChatRow key={chat.id} chat={chat} active={active === chat.id} n={i < 9 ? i + 1 : undefined} typing={typingOf(chat.id)} />
+        ))}
+      </div>
+    ) : r.kind === 'head' ? (
+      <div
+        className="section-head"
+        onContextMenu={(e) =>
+          showMenu(e, [
+            // "conversas" = the whole list (pinned too); a section = just its chats
+            ...(r.label === 'conversas'
+              ? bulk(() => Object.values(getState().chats).filter((c) => !c.archived), 'todas as conversas')
+              : bulk(() => groupChats[r.label] ?? [], r.label === 'sem seção' ? 'as conversas sem seção' : 'a seção ' + r.label)),
+            { divider: true, label: '' },
+            { label: 'Nova seção…', icon: <Plus size={15} />, onClick: () => void newSection() }
+          ])
+        }
+      >
+        {r.label}
+      </div>
+    ) : r.kind === 'arch' ? (
+      <div className={'arch-section' + (r.open ? ' open' : '')}>
+        <button className="arch-bar" onClick={() => setShowArchived((v) => !v)}>
+          <Archive size={14} />
+          <span className="arch-label">Arquivadas</span>
+          <span className="arch-count">{r.chats.length}</span>
+          <Chevron size={12} style={{ transform: r.open ? 'rotate(90deg)' : undefined, transition: 'transform .15s' }} />
+        </button>
+      </div>
+    ) : r.kind === 'archEnd' ? (
+      <div className="arch-end" />
+    ) : (
+      <ChatRow chat={r.chat} active={active === r.chat.id} n={r.n} typing={typingOf(r.chat.id)} />
+    )
 
   return (
     <aside className="sidebar">
@@ -577,50 +635,20 @@ export function Sidebar() {
 
       {pinnedStyle === 'grade' && !q && <PinnedGrid chats={pinned} active={active} typingOf={typingOf} />}
 
-      <div className="chat-list">
-        {rows.map((r) =>
-          r.kind === 'pinned' ? (
-            <div key="pinned" className="pinned-section">
-              <div className="section-head pinned-head" onContextMenu={(e) => showMenu(e, bulk(() => r.chats, 'as fixadas'))}>
-                <PinIcon size={12} /> fixadas
-              </div>
-              {r.chats.map((chat, i) => (
-                <ChatRow key={chat.id} chat={chat} active={active === chat.id} n={i < 9 ? i + 1 : undefined} typing={typingOf(chat.id)} />
-              ))}
-            </div>
-          ) : r.kind === 'head' ? (
-            <div
-              key={'h:' + r.label}
-              className="section-head"
-              onContextMenu={(e) =>
-                showMenu(e, [
-                  // "conversas" = the whole list (pinned too); a section = just its chats
-                  ...(r.label === 'conversas'
-                    ? bulk(() => Object.values(getState().chats).filter((c) => !c.archived), 'todas as conversas')
-                    : bulk(() => groupChats[r.label] ?? [], r.label === 'sem seção' ? 'as conversas sem seção' : 'a seção ' + r.label)),
-                  { divider: true, label: '' },
-                  { label: 'Nova seção…', icon: <Plus size={15} />, onClick: () => void newSection() }
-                ])
-              }
-            >
-              {r.label}
-            </div>
-          ) : r.kind === 'arch' ? (
-            <div key="arch" className={'arch-section' + (r.open ? ' open' : '')}>
-              <button className="arch-bar" onClick={() => setShowArchived((v) => !v)}>
-                <Archive size={14} />
-                <span className="arch-label">Arquivadas</span>
-                <span className="arch-count">{r.chats.length}</span>
-                <Chevron size={12} style={{ transform: r.open ? 'rotate(90deg)' : undefined, transition: 'transform .15s' }} />
-              </button>
-              {r.open && r.chats.map((chat) => <ChatRow key={chat.id} chat={chat} active={active === chat.id} typing={typingOf(chat.id)} />)}
-            </div>
-          ) : (
-            <ChatRow key={r.chat.id} chat={r.chat} active={active === r.chat.id} n={r.n} typing={typingOf(r.chat.id)} />
-          )
-        )}
-        {!rows.length && <div className="empty-list">{q ? 'Nada encontrado' : conn === 'open' ? 'Sincronizando conversas…' : ''}</div>}
-      </div>
+      {rows.length ? (
+        // only the rows on screen exist (an account with 600 chats used to build all 600 on every update)
+        <Virtuoso
+          className="chat-list"
+          data={rows}
+          increaseViewportBy={{ top: 300, bottom: 500 }}
+          computeItemKey={(_, r) => (r.kind === 'chat' ? r.chat.id : r.kind === 'head' ? 'h:' + r.label : r.kind)}
+          itemContent={(_, r) => renderRow(r)}
+        />
+      ) : (
+        <div className="chat-list">
+          <div className="empty-list">{q ? 'Nada encontrado' : conn === 'open' ? 'Sincronizando conversas…' : ''}</div>
+        </div>
+      )}
 
       <HoverPeek />
       <div className="side-foot">

@@ -3,7 +3,7 @@
 import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { AnimatePresence, animate, motion, useMotionValue } from 'motion/react'
 import type { UiMessage } from '@shared/types'
-import { getState, useStore, zap } from '../state'
+import { getState, useStore, zap, isLite } from '../state'
 import { colorOf, duration, listTime, richText, timeOf } from '../format'
 import { Avatar } from './Avatar'
 
@@ -61,7 +61,7 @@ function load(id: string): Promise<UiMessage[]> {
 
 function blocked(id: string, el: HTMLElement) {
   const s = getState()
-  if (s.settings?.hoverPeek === false || s.active === id || s.locked) return true
+  if (s.settings?.hoverPeek === false || s.active === id || s.locked || isLite(s)) return true
   if (document.querySelector('.menu, .dialog, .scrim, .popover, .lightbox')) return true
   // no room on the right (narrow window: the list fills the screen)
   const edge = el.closest('.sidebar')?.getBoundingClientRect().right ?? el.getBoundingClientRect().right

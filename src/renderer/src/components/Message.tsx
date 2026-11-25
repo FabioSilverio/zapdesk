@@ -3,7 +3,7 @@ import { AnimatePresence, motion } from 'motion/react'
 import type { UiMessage } from '@shared/types'
 import { colorOf, dayLabel, duration, firstUrl, isEmojiOnly, richBlocks, sameDay, timeOf } from '../format'
 import { LinkCard } from './Links'
-import { getState, openChat, setState, toast, useStore, zap } from '../state'
+import { getState, openChat, setState, toast, useStore, zap, isLite } from '../state'
 import { fmtWhen, pickCustomTime, timeChoices } from '../tools'
 import { Avatar } from './Avatar'
 import { askText, showMenu, type MenuItem } from './overlays'
@@ -93,7 +93,9 @@ function usePoster(m: UiMessage) {
   const tg = m.chatId.startsWith('tg:')
   const [src, setSrc] = useState<string | null>(() => (m.poster || tg ? posterUrl(m) : (grabbedPoster(m) ?? null)))
   const [ok, setOk] = useState(false)
-  const grabbable = !!m.hasMedia && prefetchable(m)
+  // lite mode: no decoding videos just for a still (the blurry thumbnail stays)
+  const lite = useStore(isLite)
+  const grabbable = !!m.hasMedia && prefetchable(m) && !lite
   const seen = useRef(false)
   const grabWhenVisible = useCallback(
     (el: HTMLElement | null) => {
@@ -203,7 +205,7 @@ function VideoBody({ m }: { m: UiMessage }) {
 /** "Transcrever" + the text, under a voice note */
 function Transcript({ m }: { m: UiMessage }) {
   const tr = useTranscript(m)
-  const auto = useStore((s) => !!s.settings?.autoTranscribe && s.whisper.ready)
+  const auto = useStore((s) => !!s.settings?.autoTranscribe && s.whisper.ready && !isLite(s))
   const dl = useStore((s) => s.whisper.progress)
   const [open, setOpen] = useState(false)
   useEffect(() => {

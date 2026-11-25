@@ -775,6 +775,8 @@ kbd {
 }
 .msg-scroller {
   height: 100%;
+  /* the hovered message lifts itself (z-index) — only above other messages, never over the header/buttons */
+  isolation: isolate;
   user-select: text;
   overflow-y: auto;
   overflow-x: hidden;
@@ -1046,6 +1048,15 @@ kbd {
   background: var(--bg-hover);
   border-radius: var(--r-sm);
 }
+/* lista: the bar sits at the row's right end, like Slack */
+:root[data-messages='lista'] .msg-line {
+  position: static;
+}
+:root[data-messages='lista'] .msg .hover-bar {
+  left: auto;
+  right: 12px;
+  transform-origin: bottom right;
+}
 
 /* new message pop-in */
 .msg.fresh .msg-col {
@@ -1058,9 +1069,23 @@ kbd {
   transform-origin: bottom left;
 }
 
-/* hover toolbar */
+/* hover toolbar: floats over the top edge of the message (takes no room), shows anywhere on the row */
+.msg {
+  position: relative;
+}
+.msg:hover {
+  z-index: 3;
+}
+/* the hovered message is on screen anyway: lift its paint clipping so the bar can stick out of it */
+.msg-scroller .msg:hover {
+  content-visibility: visible;
+}
 .hover-bar {
+  position: absolute;
+  top: -22px;
+  z-index: 4;
   display: flex;
+  align-items: center;
   gap: 1px;
   padding: 3px;
   border-radius: 999px;
@@ -1068,16 +1093,33 @@ kbd {
   border: 1px solid var(--line);
   box-shadow: var(--shadow);
   opacity: 0;
-  transform: scale(0.9);
+  transform: translateY(3px) scale(0.94);
   pointer-events: none;
-  transition: opacity 0.1s, transform 0.12s var(--ease);
-  flex-shrink: 0;
+  transition: opacity 0.1s, transform 0.14s var(--ease);
+  white-space: nowrap;
 }
-.msg-line:hover .hover-bar {
+.msg.in .hover-bar {
+  left: 10px;
+  transform-origin: bottom left;
+}
+.msg.out .hover-bar {
+  right: 10px;
+  transform-origin: bottom right;
+}
+.msg:hover .hover-bar {
   opacity: 1;
-  transform: scale(1);
+  transform: none;
   pointer-events: auto;
-  transition-delay: 0.08s;
+  transition-delay: 0.06s;
+}
+.hb-sep {
+  width: 1px;
+  height: 16px;
+  margin: 0 3px;
+  background: var(--line);
+}
+.hover-bar .hb-reply {
+  color: var(--accent);
 }
 .hover-bar button {
   width: 26px;
@@ -1088,7 +1130,10 @@ kbd {
   font-family: var(--emoji);
   font-size: 15px;
   color: var(--text-2);
-  transition: transform 0.12s var(--ease), background-color 0.1s;
+  transition: transform 0.12s var(--ease), background-color 0.1s, color 0.1s;
+}
+.hover-bar .hb-icon:hover {
+  color: var(--text);
 }
 .hover-bar button:hover {
   background: var(--bg-active);
@@ -2371,7 +2416,7 @@ video.media {
 }
 :root[data-blur='1'] .chat-row:hover .chat-preview,
 :root[data-blur='1'] .pin-tile:hover .pin-preview,
-:root[data-blur='1'] .msg-line:hover .bubble,
+:root[data-blur='1'] .msg:hover .bubble,
 :root[data-blur='1'] .sched-chip:hover span,
 :root[data-blur='1'] .reply-bar:hover .quote {
   filter: none;
@@ -4058,4 +4103,145 @@ a.link.named:hover {
   font-size: 10px;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
+}
+
+/* ---------- polls ---------- */
+.poll {
+  min-width: min(280px, 64vw);
+  max-width: 340px;
+  padding: 2px 2px 0;
+}
+.poll-q {
+  font-weight: 600;
+  font-size: 1.02em;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+.poll-hint {
+  margin: 3px 0 8px;
+  font-size: 12px;
+  color: var(--text-2);
+}
+.poll-opt {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  width: 100%;
+  padding: 6px 4px;
+  border-radius: 10px;
+  text-align: left;
+  transition: background-color 0.12s;
+}
+.poll-opt:not(:disabled):hover {
+  background: color-mix(in oklab, var(--text) 6%, transparent);
+}
+.poll-opt:not(:disabled):active .poll-check {
+  transform: scale(0.88);
+}
+.poll-check {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  margin-top: 1px;
+  border-radius: 50%;
+  border: 1.8px solid color-mix(in oklab, var(--text) 55%, transparent);
+  display: grid;
+  place-items: center;
+  color: #fff;
+  transition: background-color 0.15s, border-color 0.15s, transform 0.12s var(--ease);
+}
+.poll-check.sq {
+  border-radius: 5px;
+}
+.poll-opt.mine .poll-check {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.poll-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.poll-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.poll-name {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.poll-count {
+  font-size: 12px;
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+}
+.poll-bar {
+  height: 5px;
+  border-radius: 3px;
+  background: color-mix(in oklab, var(--text) 10%, transparent);
+  overflow: hidden;
+}
+.poll-bar i {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  background: var(--accent);
+  transition: width 0.35s var(--ease);
+}
+.poll-foot {
+  margin: 6px 4px 2px;
+  font-size: 12px;
+  color: var(--text-2);
+}
+.poll-dialog {
+  width: min(420px, calc(100vw - 32px));
+}
+.poll-label {
+  display: block;
+  margin: 12px 0 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-2);
+}
+.poll-dialog h3 + .poll-label {
+  margin-top: 0;
+}
+.poll-opts-edit {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+.poll-opt-edit {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.poll-warn {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--danger);
+}
+.poll-multi {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 14px;
+  font-size: 13px;
+}
+
+/* ---------- editing a sent message ---------- */
+.edit-bar .quote {
+  border-left-color: var(--accent);
+}
+.edit-bar .quote b {
+  display: flex;
+  align-items: center;
+  gap: 5px;
 }

@@ -59,6 +59,20 @@ export interface UiMessage {
   poster?: boolean
   /** link preview the sender attached (WhatsApp sends title/description/thumbnail with the message) */
   link?: { url: string; title?: string; description?: string; thumb?: string }
+  /** poll: options with vote counts (mine = you picked it) */
+  poll?: PollInfo
+  /** you can still edit this one (your own text, inside the app's edit window) */
+  editable?: boolean
+}
+
+export interface PollInfo {
+  name: string
+  /** more than one option can be picked */
+  multi: boolean
+  options: { name: string; votes: number; mine: boolean }[]
+  /** people who voted (one person can count in several options when multi) */
+  voters: number
+  closed?: boolean
 }
 
 export interface SharedLink {
@@ -352,6 +366,11 @@ export interface ZapApi {
   /** first frame of a video grabbed by the renderer (JPEG), kept as its preview picture */
   savePoster(chatId: string, msgId: string, jpeg: ArrayBuffer): void
   react(chatId: string, msgId: string, emoji: string): Promise<void>
+  /** your own text message, new text */
+  editMessage(chatId: string, msgId: string, text: string): Promise<void>
+  /** options = indexes picked (empty = take your vote back) */
+  votePoll(chatId: string, msgId: string, options: number[]): Promise<void>
+  sendPoll(chatId: string, name: string, options: string[], multi: boolean): Promise<void>
   read(chatId: string): Promise<void>
   typing(chatId: string, on: boolean): Promise<void>
   chatAction(chatId: string, action: ChatAction): Promise<void>

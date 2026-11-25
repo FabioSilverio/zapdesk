@@ -17,7 +17,7 @@ import { getPeerId, strippedPhotoToJpg } from 'telegram/Utils.js'
 import bigInt from 'big-integer'
 import QRCode from 'qrcode'
 import type { WAMessage } from 'baileys'
-import type { ChatAction, ConnState, FavSticker, Folder, MainEvent, MsgKind, Reaction, Reminder, ScheduledMsg, SharedItems, SharedLink, UiChat, UiMessage } from '@shared/types'
+import type { ChatAction, ConnState, FavSticker, Folder, MainEvent, MsgKind, PollInfo, Reaction, Reminder, ScheduledMsg, SharedItems, SharedLink, UiChat, UiMessage } from '@shared/types'
 import { readJson, writeAtomic, type ChatRec, type StickerRec, type Store } from './store'
 import { extractUrls, plain, voicePreview } from './normalize'
 import { TgFile } from './tgfile'
@@ -39,8 +39,30 @@ interface TgRec {
   messageTimestamp: number
   ui: UiMessage
   media?: { mime?: string; name?: string; size?: number; docId?: string; stickerThumb?: boolean }
+  /** a poll: its id (vote updates name only that) and each option's id bytes, base64 */
+  poll?: { id: string; opts: string[] }
   _deleted?: boolean
 }
+
+const tlText = (t: any): string => (typeof t === 'string' ? t : (t?.text ?? ''))
+
+/** Telegram poll + results → what the bubble shows. min results don't say what you picked: keep what we knew */
+function tgPoll(poll: Api.Poll, results: Api.PollResults | undefined, prev?: PollInfo): PollInfo {
+  const byOpt = new Map(((results?.results ?? []) as Api.PollAnswerVoters[]).map((r) => [Buffer.from(r.option).toString('base64'), r]))
+  return {
+    name: tlText(poll.question) || 'Enquete',
+    multi: !!poll.multipleChoice,
+    closed: !!poll.closed || undefined,
+    voters: results?.totalVoters ?? prev?.voters ?? 0,
+    options: (poll.answers as Api.PollAnswer[]).map((a, i) => {
+      const r = byOpt.get(Buffer.from(a.option).toString('base64'))
+      return { name: tlText(a.text), votes: r?.voters ?? prev?.options[i]?.votes ?? 0, mine: results?.min ? !!prev?.options[i]?.mine : !!r?.chosen }
+    })
+  }
+}
+
+/** Telegram lets you edit your messages for 48 hours */
+const TG_EDIT_WINDOW = 48 * 3600_000
 
 /** per-chat Telegram facts we need offline (peer type + access hash to talk to it) */
 export type TgChatInfo = NonNullable<ChatRec['tg']>
@@ -473,6 +495,7 @@ export class TgService implements ChatService {
     if (u instanceof Api.UpdateReadHistoryInbox) return this.onReadIn(toId(u.peer), u.stillUnreadCount)
     if (u instanceof Api.UpdateReadChannelInbox) return this.onReadIn(toId(new Api.PeerChannel({ channelId: u.channelId })), u.stillUnreadCount)
     if (u instanceof Api.UpdateMessageReactions) return this.onReactions(toId(u.peer), String(u.msgId), u.reactions)
+    if (u instanceof Api.UpdateMessagePoll) return this.onPoll(u)
     if (u instanceof Api.UpdateDialogFilter || u instanceof Api.UpdateDialogFilters || u instanceof Api.UpdateDialogFilterOrder)
       return void this.loadFolders().catch(() => {})
     if (
@@ -721,6 +744,7 @@ export class TgService implements ChatService {
     const tr = this.store.meta.transcripts?.[rec.key.remoteJid + '/' + ui.id]
     if (tr !== undefined) ui.transcript = tr
     if (ui.kind === 'video' && this.store.hasPoster(rec.key.remoteJid, ui.id)) ui.poster = true
+    if (ui.fromMe && ui.kind === 'text' && !rec._deleted && Date.now() - ui.ts < TG_EDIT_WINDOW) ui.editable = true
     if (rec._deleted) {
       if (!this.settings.keepDeleted) return { ...ui, kind: 'deleted', text: '🚫 Mensagem apagada', reactions: undefined }
       ui.revoked = true
@@ -822,11 +846,13 @@ export class TgService implements ChatService {
     } else if (media instanceof Api.MessageMediaContact) {
       ui.kind = 'contact'
       ui.text = `👤 ${[media.firstName, media.lastName].filter(Boolean).join(' ')}${media.phoneNumber ? ' · +' + media.phoneNumber.replace(/^\+/, '') : ''}`
-    } else if (media instanceof Api.MessageMediaPoll) {
+    } else if (media instanceof Api.MessageMediaPoll && media.poll instanceof Api.Poll) {
       ui.kind = 'poll'
-      const q: any = media.poll.question
-      const answers = (media.poll.answers as any[]).map((a) => '◦ ' + (typeof a.text === 'string' ? a.text : a.text?.text)).join('\n')
-      ui.text = '📊 ' + (typeof q === 'string' ? q : q?.text) + '\n' + answers
+      const prev = (this.store.getMessage(chatId, id) as unknown as TgRec | undefined)?.ui.poll
+      ui.poll = tgPoll(media.poll, media.results as Api.PollResults, prev)
+      ui.text = '📊 ' + ui.poll.name
+      rec.poll = { id: media.poll.id.toString(), opts: (media.poll.answers as Api.PollAnswer[]).map((a) => Buffer.from(a.option).toString('base64')) }
+      this.pollIndex.set(rec.poll.id, { chatId, msgId: id })
     } else if (media instanceof Api.MessageMediaWebPage && media.webpage instanceof Api.WebPage) {
       const w = media.webpage
       ui.link = { url: w.url, title: w.title ?? w.siteName ?? undefined, description: w.description ?? undefined }
@@ -956,6 +982,37 @@ export class TgService implements ChatService {
     c.unread = still
     if (!still) c.markedUnread = false
     this.queueChat(chatId)
+  }
+
+  /** where each poll lives: vote updates only carry the poll's id */
+  private pollIndex = new Map<string, { chatId: string; msgId: string }>()
+  private onPoll(u: Api.UpdateMessagePoll) {
+    const id = u.pollId.toString()
+    let at = this.pollIndex.get(id)
+    if (!at)
+      for (const [chatId, b] of this.store.buckets)
+        for (const r of b.msgs.values() as Iterable<unknown>) {
+          const rec = r as TgRec
+          if (rec.poll?.id === id) at = { chatId, msgId: rec.key.id }
+        }
+    if (!at) return
+    const rec = this.store.getMessage(at.chatId, at.msgId) as unknown as TgRec | undefined
+    if (!rec?.ui.poll) return
+    const prev = rec.ui.poll
+    const poll =
+      u.poll instanceof Api.Poll
+        ? u.poll
+        : // no poll in the update: rebuild it from what we know (only names/ids are needed)
+          new Api.Poll({
+            id: u.pollId,
+            question: new Api.TextWithEntities({ text: prev.name, entities: [] }),
+            answers: prev.options.map((o, i) => new Api.PollAnswer({ text: new Api.TextWithEntities({ text: o.name, entities: [] }), option: Buffer.from(rec.poll?.opts[i] ?? '', 'base64') })),
+            multipleChoice: prev.multi,
+            closed: prev.closed
+          })
+    rec.ui.poll = tgPoll(poll, u.results as Api.PollResults, prev)
+    this.store.putMessage(at.chatId, rec as unknown as WAMessage)
+    this.queueMsg(at.chatId, rec)
   }
 
   private onReactions(chatId: string, msgId: string, reactions: any) {
@@ -1130,6 +1187,37 @@ export class TgService implements ChatService {
     if (!rec) return
     if (rec.ui.kind === 'text' && rec.ui.text) await this.send(chatId, rec.ui.text)
     else await this.requireOpen().forwardMessages(await this.peer(chatId), { messages: [Number(msgId)], fromPeer: await this.peer(chatId) })
+  }
+
+  async editMessage(chatId: string, msgId: string, text: string) {
+    const client = this.requireOpen()
+    const { text: t, entities } = fromMarkup(text.trim())
+    if (!t) return
+    const res = await client.editMessage(await this.peer(chatId), { message: Number(msgId), text: t, formattingEntities: entities })
+    if (res) this.ingest(res, true, true)
+  }
+
+  async sendPoll(chatId: string, name: string, options: string[], multi: boolean) {
+    const values = [...new Set(options.map((o) => o.trim()).filter(Boolean))].slice(0, 10)
+    if (!name.trim() || values.length < 2) throw new Error('A enquete precisa de uma pergunta e 2 opções')
+    const client = this.requireOpen()
+    const poll = new Api.Poll({
+      id: big(Date.now()),
+      question: new Api.TextWithEntities({ text: name.trim(), entities: [] }),
+      answers: values.map((v, i) => new Api.PollAnswer({ text: new Api.TextWithEntities({ text: v, entities: [] }), option: Buffer.from([i]) })),
+      multipleChoice: multi
+    })
+    const sent = await client.sendMessage(await this.peer(chatId), { message: '', file: new Api.InputMediaPoll({ poll }) })
+    if (sent) this.ingest(sent, true)
+  }
+
+  async votePoll(chatId: string, msgId: string, picked: number[]) {
+    const client = this.requireOpen()
+    const rec = this.store.getMessage(chatId, msgId) as unknown as TgRec | undefined
+    if (!rec?.poll || !rec.ui.poll) return
+    const opts = [...new Set(picked)].filter((i) => i >= 0 && i < rec.poll!.opts.length)
+    const res: any = await client.invoke(new Api.messages.SendVote({ peer: await this.peer(chatId), msgId: Number(msgId), options: opts.map((i) => Buffer.from(rec.poll!.opts[i], 'base64')) }))
+    for (const u of res?.updates ?? []) if (u instanceof Api.UpdateMessagePoll) this.onPoll(u)
   }
 
   async react(chatId: string, msgId: string, emoji: string) {

@@ -35,6 +35,8 @@ export interface State {
   sync: { progress: number | null; done: boolean }
   toast?: { text: string; id: number }
   replyTo?: UiMessage
+  /** your message being edited in the composer */
+  editing?: UiMessage
   settingsOpen: boolean
   settingsTab?: string
   /** shared media/links/docs drawer open for the active chat */
@@ -141,7 +143,7 @@ export function toast(text: string) {
 
 export async function openChat(id: string | null, opts?: { keepMedia?: boolean }) {
   const switching = id !== state.active
-  setState({ active: id, replyTo: undefined, ...(switching && !opts?.keepMedia ? { mediaOpen: false } : {}) })
+  setState({ active: id, replyTo: undefined, editing: undefined, ...(switching && !opts?.keepMedia ? { mediaOpen: false } : {}) })
   zap.setActiveChat(id)
   if (!id) return
   void zap.read(id).catch(() => {})
@@ -223,7 +225,7 @@ export function handleEvent(ev: MainEvent) {
         delete threads[id]
       }
       const leaving = ev.ids.includes(state.active ?? '')
-      setState({ chats, threads, active: leaving ? null : state.active, replyTo: leaving ? undefined : state.replyTo })
+      setState({ chats, threads, active: leaving ? null : state.active, replyTo: leaving ? undefined : state.replyTo, editing: leaving ? undefined : state.editing })
       if (leaving) zap.setActiveChat(null)
       break
     }

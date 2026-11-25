@@ -241,3 +241,8 @@ export const LinkIcon = (p: P) => (
     <path d="M14 11a4.5 4.5 0 0 0-6.4-.4L5.4 12.8a4.5 4.5 0 0 0 6.4 6.4l1.3-1.3" />
   </svg>
 )
+export const PollIcon = (p: P) => (
+  <svg {...base(p)}>
+    <path d="M5 20V10M12 20V4M19 20v-7" />
+  </svg>
+)

@@ -7,7 +7,8 @@ import { getState, openChat, setState, toast, useStore, zap, isLite } from '../s
 import { fmtWhen, pickCustomTime, timeChoices } from '../tools'
 import { Avatar } from './Avatar'
 import { askText, showMenu, type MenuItem } from './overlays'
-import { Check, Checks, Clock, Copy, Doc, Eye, Pause, Pencil, Play, Plus, Reply, Smile, Star, TextLines } from './icons'
+import { Check, Checks, Clock, Copy, Doc, Eye, More, Pause, Pencil, Play, Plus, Reply, Smile, Star, TextLines } from './icons'
+import { PollBody } from './Poll'
 import { isVoice, transcribeMsg, useTranscript } from '../transcribe'
 import { grabPoster, grabbedPoster, posterUrl } from '../posters'
 import { MentionCtx, openPerson } from './People'
@@ -350,6 +351,8 @@ function Body({ m, onOpen }: { m: UiMessage; onOpen: (src: string) => void }) {
           <span className="doc-ext">{(m.fileName?.split('.').pop() ?? '').toUpperCase().slice(0, 5)}</span>
         </button>
       )
+    case 'poll':
+      return m.poll ? <PollBody m={m} /> : null
     case 'location':
       return (
         <a className="loc" href={m.fileName} target="_blank" rel="noreferrer">
@@ -393,10 +396,12 @@ export const Message = memo(function Message({ m, prev, isGroup, fresh, onOpenIm
     )
 
   const react = (e: string) => zap.react(m.chatId, m.id, e).catch((err) => toast(err?.message ?? 'Não reagiu'))
-  const reply = () => setState({ replyTo: m })
+  const reply = () => setState({ replyTo: m, editing: undefined })
+  const edit = () => setState({ editing: m, replyTo: undefined })
   const emojiOnly = m.kind === 'text' && isEmojiOnly(m.text)
   const bare = m.kind === 'sticker' || emojiOnly
-  const hasCaption = m.text && m.kind !== 'text' && m.kind !== 'location' && m.kind !== 'deleted' && m.kind !== 'unknown'
+  // contact/poll text is the content itself (shown above or as the poll card), not a caption
+  const hasCaption = m.text && m.kind !== 'text' && m.kind !== 'location' && m.kind !== 'deleted' && m.kind !== 'unknown' && m.kind !== 'contact' && m.kind !== 'poll'
   // group members get their profile photo (lista mode: everyone, you included)
   const showAvatar = (isGroup && !m.fromMe) || listMode
   const avatarId = m.fromMe ? (meId ?? '') : (m.sender ?? m.chatId)
@@ -408,12 +413,13 @@ export const Message = memo(function Message({ m, prev, isGroup, fresh, onOpenIm
     void zap.remind(m.chatId, m.id, at).then(() => toast(`⏰ Vou te lembrar ${fmtWhen(at)}`))
   }
 
-  const menu = (e: React.MouseEvent) => {
+  const menu = (e: { clientX: number; clientY: number; target: EventTarget; preventDefault: () => void }) => {
     if ((e.target as HTMLElement).closest('a')) return
     const items: MenuItem[] = [
       { label: 'Responder', icon: <Reply size={15} />, onClick: reply },
       { label: 'Reagir…', icon: <Smile size={15} />, onClick: () => onReactMore(m, e.clientX, e.clientY) }
     ]
+    if (m.editable) items.push({ label: 'Editar', icon: <Pencil size={15} />, onClick: edit })
     if (m.text) items.push({ label: 'Copiar texto', icon: <Copy size={15} />, onClick: () => void navigator.clipboard.writeText(m.text!).then(() => toast('Copiado')) })
     if (m.kind === 'audio') {
       const t = m.transcript ?? undefined
@@ -474,7 +480,7 @@ export const Message = memo(function Message({ m, prev, isGroup, fresh, onOpenIm
               )}
               <Body m={m} onOpen={onOpenImage} />
               <MentionCtx.Provider value={m.mentions}>
-                {(m.kind === 'text' || m.kind === 'deleted' || m.kind === 'unknown' || m.kind === 'poll' || m.kind === 'contact') && (
+                {(m.kind === 'text' || m.kind === 'deleted' || m.kind === 'unknown' || (m.kind === 'poll' && !m.poll) || m.kind === 'contact') && (
                   <div className="text">{m.kind === 'text' ? richBlocks(m.text ?? '') : m.text}</div>
                 )}
                 {hasCaption && <div className="text caption">{richBlocks(m.text!)}</div>}
@@ -501,17 +507,33 @@ export const Message = memo(function Message({ m, prev, isGroup, fresh, onOpenIm
               </span>
             </div>
             {m.kind !== 'deleted' && (
-              <div className="hover-bar">
+              <div className="hover-bar" onDoubleClick={(e) => e.stopPropagation()}>
+                <button title="Responder" className="hb-reply" onClick={reply}>
+                  <Reply size={15} />
+                </button>
+                {m.editable && (
+                  <button title="Editar" className="hb-icon" onClick={edit}>
+                    <Pencil size={14} />
+                  </button>
+                )}
+                <i className="hb-sep" />
                 {quickFor().slice(0, 3).map((e) => (
                   <button key={e} onClick={() => void react(e)}>
                     {e}
                   </button>
                 ))}
-                <button title="Mais reações" onClick={(ev) => onReactMore(m, ev.clientX, ev.clientY)}>
+                <button title="Mais reações" className="hb-icon" onClick={(ev) => onReactMore(m, ev.clientX, ev.clientY)}>
                   <Plus size={14} />
                 </button>
-                <button title="Responder" onClick={reply}>
-                  <Reply size={14} />
+                <button
+                  title="Mais opções"
+                  className="hb-icon"
+                  onClick={(ev) => {
+                    const r = ev.currentTarget.getBoundingClientRect()
+                    menu({ clientX: r.left, clientY: r.bottom + 4, target: ev.currentTarget, preventDefault: () => {} })
+                  }}
+                >
+                  <More size={15} />
                 </button>
               </div>
             )}

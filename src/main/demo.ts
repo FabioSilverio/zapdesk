@@ -85,7 +85,31 @@ export function seedDemo(store: Store) {
   const c = createCipheriv('aes-256-gcm', ekey, iv)
   const encPayload = Buffer.concat([c.update(inner), c.final(), c.getAuthTag()])
   const secretEdit = { key: { remoteJid: bu, fromMe: false, id: 'DEMOSECRETEDIT' }, message: { secretEncryptedMessage: { targetMessageKey: { remoteJid: bu, fromMe: true, id: orig.key.id }, encPayload, encIv: iv, secretEncType: 2 } }, messageTimestamp: NOW - 205 } as unknown as WAMessage
-  list.push(vid, aud, gone, edited, orig, secretEdit, fmt)
+  // a poll with votes (as history sync stores them: option hashes in base64) + one of yours
+  const h = (t: string) => createHash('sha256').update(t).digest('base64')
+  const poll = {
+    key: { remoteJid: bu, fromMe: false, id: 'DEMOPOLL1' },
+    message: {
+      messageContextInfo: { messageSecret: randomBytes(32) },
+      pollCreationMessageV3: { name: 'Qual horário fica melhor pra reunião?', selectableOptionsCount: 1, options: [{ optionName: '9h' }, { optionName: '10h' }, { optionName: '14h' }] }
+    },
+    messageTimestamp: NOW - 150,
+    pollUpdates: [
+      { pollUpdateMessageKey: { remoteJid: bu, fromMe: false, id: 'v1' }, vote: { selectedOptions: [h('10h')] }, senderTimestampMs: (NOW - 140) * 1000 },
+      { pollUpdateMessageKey: { remoteJid: bu, fromMe: true, id: 'v2' }, vote: { selectedOptions: [h('10h')] }, senderTimestampMs: (NOW - 130) * 1000 }
+    ]
+  } as unknown as WAMessage
+  const multi = {
+    key: { remoteJid: bu, fromMe: true, id: 'DEMOPOLL2' },
+    message: {
+      messageContextInfo: { messageSecret: randomBytes(32) },
+      pollCreationMessage: { name: 'O que levar pro churrasco?', selectableOptionsCount: 0, options: [{ optionName: 'Carne' }, { optionName: 'Bebida' }, { optionName: 'Sobremesa' }] }
+    },
+    messageTimestamp: NOW - 120,
+    status: 4,
+    pollUpdates: [{ pollUpdateMessageKey: { remoteJid: bu, fromMe: false, id: 'v3' }, vote: { selectedOptions: [h('Carne'), h('Bebida')] }, senderTimestampMs: (NOW - 100) * 1000 }]
+  } as unknown as WAMessage
+  list.push(vid, aud, gone, edited, orig, secretEdit, fmt, poll, multi, msg(bu, true, 'mandei a enquete aí em cima 👆', 60))
   const mediaDir = process.env.ZAP_DEMO_MEDIA
   if (mediaDir) {
     const target = path.join(store.dir, 'media')

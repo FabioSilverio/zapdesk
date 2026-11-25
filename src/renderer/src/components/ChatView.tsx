@@ -8,7 +8,8 @@ import { Safe } from './Safe'
 import { EmojiPopover, StickerPopover } from './Pickers'
 import { showMenu } from './overlays'
 import { chatMenu, toggleBlock } from './Sidebar'
-import { Back, BlockIcon, Clock, Down, More, Paperclip, PhotoIcon, PinIcon, Send, Smile, StickerIcon, X } from './icons'
+import { Back, BlockIcon, Check, Clock, Doc, Down, More, Paperclip, Pencil, PhotoIcon, PinIcon, PollIcon, Send, Smile, StickerIcon, X } from './icons'
+import { PollDialog } from './Poll'
 import { fmtWhen, pickCustomTime, timeChoices } from '../tools'
 import { firstUrl, hasFormatting, richBlocks } from '../format'
 import { useLinkMeta } from './Links'
@@ -132,8 +133,14 @@ function ScheduledBar({ chatId }: { chatId: string }) {
 
 function Composer({ chat }: { chat: UiChat }) {
   const replyTo = useStore((s) => s.replyTo)
+  const editing = useStore((s) => (s.editing?.chatId === chat.id ? s.editing : undefined))
   const quick = useStore((s) => s.settings?.quickReplies ?? [])
   const [text, setText] = useState(() => drafts.get(chat.id) ?? '')
+  const [pollOpen, setPollOpen] = useState(false)
+  /** what you were typing before you started editing a sent message (comes back after) */
+  const stash = useRef<string | null>(null)
+  /** an edit that didn't go through: comes back into the box as you left it */
+  const retryEdit = useRef<string | null>(null)
   const [panel, setPanel] = useState<'emoji' | 'sticker' | null>(null)
   const [qIndex, setQIndex] = useState(0)
   const [hasSel, setHasSel] = useState(false)
@@ -192,6 +199,27 @@ function Composer({ chat }: { chat: UiChat }) {
   useEffect(() => {
     ta.current?.focus()
   }, [chat.id, replyTo])
+
+  // editing: the message's text goes into the box (your draft waits), cursor at the end
+  useEffect(() => {
+    if (!editing) return
+    if (stash.current === null) stash.current = ta.current?.value ?? ''
+    const t = retryEdit.current ?? editing.text ?? ''
+    retryEdit.current = null
+    setText(t)
+    requestAnimationFrame(() => {
+      const el = ta.current
+      if (!el) return
+      el.focus()
+      el.setSelectionRange(t.length, t.length)
+    })
+  }, [editing])
+  const stopEditing = () => {
+    const back = stash.current ?? drafts.get(chat.id) ?? ''
+    stash.current = null
+    setState({ editing: undefined })
+    setText(back)
+  }
   useEffect(() => setQIndex(0), [text])
 
   // format bar follows the real text selection (mouse drag, Shift+arrows, Ctrl+A, double click)
@@ -228,6 +256,8 @@ function Composer({ chat }: { chat: UiChat }) {
 
   const onChange = (v: string) => {
     setText(v)
+    // editing a sent message: not a draft, and nobody sees "digitando…"
+    if (getState().editing) return
     drafts.set(chat.id, v)
     const t = typingRef.current
     if (!t.on && v) {
@@ -246,6 +276,18 @@ function Composer({ chat }: { chat: UiChat }) {
 
   const send = () => {
     const body = text.trim()
+    const ed = getState().editing
+    if (ed) {
+      if (!body) return
+      stopEditing()
+      if (body === (ed.text ?? '').trim()) return
+      zap.editMessage(chat.id, ed.id, body).catch((e) => {
+        toast(cleanError(e) || 'Não editou')
+        retryEdit.current = body
+        setState({ editing: ed })
+      })
+      return
+    }
     if (!body) return
     clear()
     const quoted = getState().replyTo?.id
@@ -376,8 +418,23 @@ function Composer({ chat }: { chat: UiChat }) {
           </motion.div>
         )}
       </AnimatePresence>
+      <AnimatePresence>{pollOpen && <PollDialog chatId={chat.id} onClose={() => setPollOpen(false)} />}</AnimatePresence>
       <AnimatePresence initial={false}>
-        {replyTo && (
+        {editing && (
+          <motion.div key="ed" className="reply-bar edit-bar" initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }} transition={{ duration: 0.15 }}>
+            <div className="quote">
+              <b>
+                <Pencil size={12} />
+                Editando mensagem
+              </b>
+              <span>{editing.text}</span>
+            </div>
+            <button className="icon-btn sm" title="Cancelar edição (Esc)" onClick={stopEditing}>
+              <X size={14} />
+            </button>
+          </motion.div>
+        )}
+        {replyTo && !editing && (
           <motion.div className="reply-bar" initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }} transition={{ duration: 0.15 }}>
             <div className="quote">
               <b>{replyTo.fromMe ? 'Você' : replyTo.senderName || chat.name}</b>
@@ -392,13 +449,22 @@ function Composer({ chat }: { chat: UiChat }) {
       <div className="composer">
         <button
           className="icon-btn"
-          title="Enviar arquivo (ou arraste / cole com Ctrl+V)"
-          onClick={() =>
-            zap
-              .pickFiles()
-              .then((f) => stageFiles(chat.id, f))
-              .catch((e) => toast(cleanError(e)))
-          }
+          title="Anexar arquivo ou criar enquete (ou arraste / cole com Ctrl+V)"
+          onClick={(e) => {
+            const r = e.currentTarget.getBoundingClientRect()
+            showMenu({ clientX: r.left, clientY: r.top - 92 }, [
+              {
+                label: 'Foto, vídeo ou arquivo',
+                icon: <Doc size={15} />,
+                onClick: () =>
+                  void zap
+                    .pickFiles()
+                    .then((f) => stageFiles(chat.id, f))
+                    .catch((err) => toast(cleanError(err)))
+              },
+              { label: 'Enquete', icon: <PollIcon size={15} />, onClick: () => setPollOpen(true) }
+            ])
+          }}
         >
           <Paperclip size={18} />
         </button>
@@ -406,7 +472,7 @@ function Composer({ chat }: { chat: UiChat }) {
           ref={ta}
           rows={1}
           value={text}
-          placeholder={`Mensagem para ${chat.name}  ·  / respostas rápidas`}
+          placeholder={editing ? 'Edite a mensagem · Enter salva · Esc cancela' : `Mensagem para ${chat.name}  ·  / respostas rápidas  ·  ↑ edita a última`}
           onChange={(e) => onChange(e.target.value)}
           onBlur={() => setHasSel(false)}
           onKeyDown={(e) => {
@@ -436,9 +502,23 @@ function Composer({ chat }: { chat: UiChat }) {
               e.preventDefault()
               send()
             }
+            // ↑ in an empty box: edit your last message (like WhatsApp/Telegram desktop)
+            if (e.key === 'ArrowUp' && !text && !getState().editing && !e.shiftKey && !mod) {
+              const list = getState().threads[chat.id]?.list ?? []
+              for (let i = list.length - 1; i >= 0 && i >= list.length - 30; i--) {
+                if (list[i].fromMe && list[i].editable) {
+                  e.preventDefault()
+                  setState({ editing: list[i], replyTo: undefined })
+                  break
+                }
+              }
+            }
             if (e.key === 'Escape') {
               if (panel) {
                 setPanel(null)
+                e.preventDefault()
+              } else if (getState().editing) {
+                stopEditing()
                 e.preventDefault()
               } else if (suggestions.length) {
                 onChange('')
@@ -483,14 +563,14 @@ function Composer({ chat }: { chat: UiChat }) {
         </button>
         <motion.button
           className="send-btn"
-          title="Enviar (Enter) · botão direito: agendar"
+          title={editing ? 'Salvar edição (Enter)' : 'Enviar (Enter) · botão direito: agendar'}
           disabled={!text.trim()}
           onClick={send}
-          onContextMenu={scheduleMenu}
+          onContextMenu={(e) => (editing ? e.preventDefault() : scheduleMenu(e))}
           animate={{ scale: text.trim() ? 1 : 0.86, opacity: text.trim() ? 1 : 0.45 }}
           transition={{ type: 'spring', stiffness: 600, damping: 30 }}
         >
-          <Send size={17} />
+          {editing ? <Check size={18} strokeWidth={2.4} /> : <Send size={17} />}
         </motion.button>
       </div>
     </div>

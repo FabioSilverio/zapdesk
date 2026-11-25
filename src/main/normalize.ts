@@ -1,5 +1,6 @@
-import { getContentType, normalizeMessageContent, proto, type WAMessage } from 'baileys'
-import type { MsgKind, Reaction, UiMessage } from '@shared/types'
+import { aesEncryptGCM, getContentType, hmacSign, normalizeMessageContent, proto, type WAMessage } from 'baileys'
+import { createHash, randomBytes } from 'node:crypto'
+import type { MsgKind, PollInfo, Reaction, UiMessage } from '@shared/types'
 import { tsOf } from './store'
 
 export type NameFn = (jid: string, pushName?: string | null) => string
@@ -177,6 +178,78 @@ export function isInvisible(m: WAMessage): boolean {
   )
 }
 
+/** a poll's question/options, whichever of the 3 poll formats it came in */
+export function pollCreationOf(c: proto.IMessage | undefined | null) {
+  return c?.pollCreationMessage ?? c?.pollCreationMessageV2 ?? c?.pollCreationMessageV3 ?? undefined
+}
+
+/** an option's id inside a vote: SHA-256 of its text */
+export const pollOptionHash = (name: string) => createHash('sha256').update(Buffer.from(name)).digest()
+
+/** who cast a vote, the same way for history votes, live ones and yours ("me") */
+export const pollVoter = (k: proto.IMessageKey | null | undefined) => (k?.fromMe ? 'me' : k?.participant || k?.remoteJid || '')
+
+/**
+ * Keeps one vote per person (the newest) on the poll message: an empty vote = they took it back.
+ * Votes live on the stored poll as `pollUpdates`, the same field the phone's history sync fills in.
+ */
+export function putPollVote(target: WAMessage, up: proto.IPollUpdate, canon: (jid: string) => string = (j) => j) {
+  // the same person can show up as a LID and as a phone number
+  const voter = (k: proto.IMessageKey | null | undefined) => {
+    const w = pollVoter(k)
+    return w === 'me' || !w ? w : canon(w) || w
+  }
+  const who = voter(up.pollUpdateMessageKey)
+  const at = num(up.senderTimestampMs) ?? 0
+  const list = (target.pollUpdates ?? []).filter((u) => {
+    if (voter(u.pollUpdateMessageKey) !== who) return true
+    return (num(u.senderTimestampMs) ?? 0) > at // a newer vote of theirs is already here: keep it
+  })
+  const newer = list.some((u) => voter(u.pollUpdateMessageKey) === who)
+  if (!newer && up.vote?.selectedOptions?.length) list.push(up)
+  target.pollUpdates = list
+}
+
+export function pollOf(m: WAMessage, c: proto.IMessage | undefined | null): PollInfo | undefined {
+  const pc = pollCreationOf(c)
+  if (!pc) return undefined
+  const names = (pc.options ?? []).map((o) => o.optionName || '')
+  const index = new Map(names.map((n, i) => [pollOptionHash(n).toString('hex'), i]))
+  const votes = names.map(() => 0)
+  const mine = names.map(() => false)
+  const people = new Set<string>()
+  for (const u of m.pollUpdates ?? []) {
+    const who = pollVoter(u.pollUpdateMessageKey)
+    let any = false
+    for (const h of u.vote?.selectedOptions ?? []) {
+      // history sync stores the hashes as base64 text, live votes as bytes
+      const i = index.get((typeof h === 'string' ? Buffer.from(h, 'base64') : Buffer.from(h)).toString('hex'))
+      if (i === undefined) continue
+      votes[i]++
+      if (who === 'me') mine[i] = true
+      any = true
+    }
+    if (any) people.add(who)
+  }
+  return {
+    name: pc.name || 'Enquete',
+    multi: (pc.selectableOptionsCount ?? 0) !== 1,
+    options: names.map((name, i) => ({ name, votes: votes[i], mine: mine[i] })),
+    voters: people.size
+  }
+}
+
+/** the reverse of Baileys' decryptPollVote: what the phone and the other people's apps open */
+export function encryptPollVote(vote: { selectedOptions: Buffer[] }, ctx: { pollCreatorJid: string; pollMsgId: string; pollEncKey: Uint8Array; voterJid: string }) {
+  const sign = Buffer.concat([Buffer.from(ctx.pollMsgId), Buffer.from(ctx.pollCreatorJid), Buffer.from(ctx.voterJid), Buffer.from('Poll Vote'), new Uint8Array([1])])
+  const key0 = hmacSign(ctx.pollEncKey as Buffer, new Uint8Array(32) as Buffer, 'sha256')
+  const encKey = hmacSign(sign, key0, 'sha256')
+  const encIv = randomBytes(12)
+  const plain = proto.Message.PollVoteMessage.encode(vote).finish()
+  const encPayload = aesEncryptGCM(plain, encKey, encIv, Buffer.from(`${ctx.pollMsgId}\u0000${ctx.voterJid}`))
+  return { encPayload, encIv }
+}
+
 export interface UiCtx {
   name: NameFn
   canon: (jid: string) => string
@@ -335,6 +408,7 @@ export function toUi(chatId: string, m: WAMessage, { name, canon, reactions, fav
       if (p) {
         set(type?.startsWith('poll') ? 'poll' : type?.startsWith('contact') ? 'contact' : 'text')
         ui.text = p
+        if (ui.kind === 'poll') ui.poll = pollOf(m, c)
       } else {
         set('unknown')
         ui.text = 'Mensagem não suportada — abra no celular'

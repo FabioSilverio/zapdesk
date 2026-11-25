@@ -9,6 +9,8 @@ import makeWASocket, {
   ALL_WA_PATCH_NAMES,
   Browsers,
   DisconnectReason,
+  decryptPollVote,
+  generateWAMessageFromContent,
   downloadContentFromMessage,
   downloadMediaMessage,
   fetchLatestBaileysVersion,
@@ -30,7 +32,7 @@ import makeWASocket, {
 } from 'baileys'
 import type { ChatAction, ConnState, FavSticker, MainEvent, Reminder, ScheduledMsg, SharedItems, SharedLink, UiChat, UiMessage } from '@shared/types'
 import { Store, tsOf, type ChatRec, type StickerRec } from './store'
-import { contentOf, extractUrls, isCiphertext, isInvisible, isRevokeStub, previewOf, stickerIdOf, stubTextOf, toUi, unwrapEdit, voicePreview } from './normalize'
+import { contentOf, encryptPollVote, extractUrls, isCiphertext, isInvisible, isRevokeStub, pollCreationOf, pollOptionHash, previewOf, putPollVote, stickerIdOf, stubTextOf, toUi, unwrapEdit, voicePreview } from './normalize'
 import { getLinkMeta } from './links'
 
 const BATCH_MS = 40
@@ -302,6 +304,7 @@ export class WaService implements ChatService {
     const tr = this.store.meta.transcripts?.[ui.id]
     if (tr !== undefined) ui.transcript = tr
     if (ui.kind === 'video' && this.store.hasPoster(chatId, ui.id)) ui.poster = true
+    if (ui.fromMe && ui.kind === 'text' && !ui.revoked && Date.now() - ui.ts < EDIT_WINDOW) ui.editable = true
     // sent ones still on "pending" after a while (sent before this fix, or history without a status) did go out:
     // a failed send never gets stored, so show ✓ instead of a clock forever
     if (ui.fromMe && (ui.status ?? 0) <= 1 && Date.now() - ui.ts > 60_000 && ui.kind !== 'deleted') ui.status = proto.WebMessageInfo.Status.SERVER_ACK
@@ -404,6 +407,11 @@ export class WaService implements ChatService {
     // edits now come end-to-end encrypted with the original message's secret: open them here
     if (type === 'secretEncryptedMessage') {
       if (!this.openSecretEdit(chatId, m)) this.store.putMessage(chatId, m) // original not here yet: retried when the chat opens
+      return
+    }
+    // a vote: encrypted with the poll's secret, counted on the poll itself
+    if (type === 'pollUpdateMessage') {
+      if (!this.openPollVote(chatId, m)) this.store.putMessage(chatId, m) // poll not here yet: retried when the chat opens
       return
     }
     if (type === 'protocolMessage') {
@@ -652,10 +660,7 @@ export class WaService implements ChatService {
     const iv = toBuf(se.encIv)!
     if (payload.length <= 16) return true
     // who wrote it, in every form WhatsApp might have used (LID / phone number)
-    const k: any = m.key
-    const who = m.key.fromMe ? [this.me?.lid, this.me?.id] : [k.participant, k.participantAlt, m.participant, k.remoteJid, k.remoteJidAlt]
-    const cands = [...new Set(who.filter((j): j is string => !!j && !isJidGroup(j)).map((j) => jidNormalizedUser(j)))]
-    for (const sender of cands) {
+    for (const sender of this.authorForms(m)) {
       try {
         const key = Buffer.from(hkdfSync('sha256', secret, Buffer.alloc(32), Buffer.concat([Buffer.from(targetId), Buffer.from(sender), Buffer.from(sender), Buffer.from('Message Edit')]), 32))
         const d = createDecipheriv('aes-256-gcm', key, iv)
@@ -675,9 +680,48 @@ export class WaService implements ChatService {
   private secretDone = new Set<string>()
   private applyStoredEdits(chatId: string) {
     for (const m of this.store.sorted(chatId)) {
-      if (!m.key.id || this.secretDone.has(m.key.id) || !normalizeMessageContent(m.message ?? undefined)?.secretEncryptedMessage) continue
-      if (this.openSecretEdit(chatId, m)) this.secretDone.add(m.key.id)
+      if (!m.key.id || this.secretDone.has(m.key.id)) continue
+      const c = normalizeMessageContent(m.message ?? undefined)
+      if (c?.secretEncryptedMessage) {
+        if (this.openSecretEdit(chatId, m)) this.secretDone.add(m.key.id)
+      } else if (c?.pollUpdateMessage) {
+        if (this.openPollVote(chatId, m)) this.secretDone.add(m.key.id)
+      }
     }
+  }
+
+  /** the forms a person's id may take inside WhatsApp's encryption labels (LID and phone number) */
+  private authorForms(m: WAMessage): string[] {
+    const k: any = m.key
+    const who = m.key.fromMe ? [this.me?.lid, this.me?.id] : [k.participant, k.participantAlt, m.participant, k.remoteJid, k.remoteJidAlt]
+    return [...new Set(who.filter((j): j is string => !!j && !isJidGroup(j)).map((j) => jidNormalizedUser(j)))]
+  }
+
+  /**
+   * A poll vote (pollUpdateMessage): AES-GCM with a key from the poll's messageSecret, labelled with the poll id,
+   * the poll's author and the voter. Returns false when the poll isn't stored (yet).
+   */
+  private openPollVote(chatId: string, m: WAMessage): boolean {
+    const pu = normalizeMessageContent(m.message ?? undefined)?.pollUpdateMessage
+    const pollId = pu?.pollCreationMessageKey?.id
+    if (!pollId || !pu?.vote?.encPayload || !pu.vote.encIv) return true
+    const poll = this.store.getMessage(chatId, pollId)
+    if (!poll) return false
+    const secret = toBuf((poll.message?.messageContextInfo ?? normalizeMessageContent(poll.message ?? undefined)?.messageContextInfo)?.messageSecret)
+    if (!secret?.length) return true
+    for (const pollCreatorJid of this.authorForms(poll))
+      for (const voterJid of this.authorForms(m)) {
+        try {
+          const vote = decryptPollVote(pu.vote as any, { pollCreatorJid, pollMsgId: pollId, pollEncKey: secret, voterJid })
+          putPollVote(poll, { pollUpdateMessageKey: m.key, vote, senderTimestampMs: pu.senderTimestampMs ?? tsOf(m) }, (j) => this.canon(j))
+          this.store.markChat(chatId)
+          this.queueMsg(chatId, poll)
+          return true
+        } catch {
+          // another form of the ids: try the next pair
+        }
+      }
+    return true
   }
 
   private applyEdit(chatId: string, msgId: string, edited: proto.IMessage) {
@@ -992,6 +1036,11 @@ export class WaService implements ChatService {
           if (!key.id || !key.remoteJid) continue
           const chatId = this.chatIdOf(key)
           const target = this.store.getMessage(chatId, key.id)
+          if (target && update.pollUpdates?.length) {
+            for (const u of update.pollUpdates) putPollVote(target, u, (j) => this.canon(j))
+            this.store.markChat(chatId)
+            this.queueMsg(chatId, target)
+          }
           if (update.message?.editedMessage) this.applyEdit(chatId, key.id, update.message.editedMessage as any)
           else if (target && isCiphertext(target) && update.message) {
             this.safe(() => this.ingest({ ...target, ...update, message: update.message } as WAMessage, true))
@@ -1547,6 +1596,60 @@ export class WaService implements ChatService {
     await this.sendContent(chatId, { sticker: fs.readFileSync(file) } as AnyMessageContent)
   }
 
+  /** changes the text of a message you sent (WhatsApp allows 15 minutes) */
+  async editMessage(chatId: string, msgId: string, text: string) {
+    const sock = this.requireOpen()
+    const target = this.store.getMessage(chatId, msgId)
+    const t = text.trim()
+    if (!target?.key.fromMe || !t) return
+    if (Date.now() - tsOf(target) > EDIT_WINDOW) throw new Error('Só dá pra editar até 15 minutos depois de enviar')
+    await sock.sendMessage(target.key.remoteJid!, { text: t, edit: target.key })
+    this.applyEdit(chatId, msgId, { conversation: t })
+  }
+
+  async sendPoll(chatId: string, name: string, options: string[], multi: boolean) {
+    const values = [...new Set(options.map((o) => o.trim()).filter(Boolean))].slice(0, 12)
+    if (!name.trim() || values.length < 2) throw new Error('A enquete precisa de uma pergunta e 2 opções')
+    await this.sendContent(chatId, { poll: { name: name.trim(), values, selectableCount: multi ? 0 : 1 } } as AnyMessageContent)
+  }
+
+  /**
+   * Your vote: the option names' SHA-256, encrypted the way openPollVote reads it, sent as a pollUpdateMessage.
+   * Shows right away here; [] takes the vote back.
+   */
+  async votePoll(chatId: string, msgId: string, picked: number[]) {
+    const sock = this.requireOpen()
+    const poll = this.store.getMessage(chatId, msgId)
+    const pc = pollCreationOf(normalizeMessageContent(poll?.message ?? undefined))
+    if (!poll || !pc) return
+    const secret = toBuf((poll.message?.messageContextInfo ?? normalizeMessageContent(poll.message ?? undefined)?.messageContextInfo)?.messageSecret)
+    if (!secret?.length) throw new Error('Essa enquete não aceita voto por aqui — vote no celular')
+    const names = (pc.options ?? []).map((o) => o.optionName || '')
+    const selectedOptions = [...new Set(picked)].filter((i) => i >= 0 && i < names.length).map((i) => pollOptionHash(names[i]))
+    // ids in the form this chat uses (groups and contacts moved to LIDs; older ones still use the number)
+    const k: any = poll.key
+    const lid = isJidGroup(chatId) ? this.groups.get(chatId)?.addressingMode === 'lid' || !!k.participant?.endsWith('@lid') : chatId.endsWith('@lid') || !!k.remoteJid?.endsWith('@lid')
+    const meJid = jidNormalizedUser((lid && this.me?.lid) || this.me!.id)
+    const creator = poll.key.fromMe ? meJid : jidNormalizedUser(k.participant || poll.participant || k.remoteJid)
+    const vote = encryptPollVote({ selectedOptions }, { pollCreatorJid: creator, pollMsgId: msgId, pollEncKey: secret, voterJid: meJid })
+    const at = Date.now()
+    const msg = generateWAMessageFromContent(
+      poll.key.remoteJid!,
+      {
+        pollUpdateMessage: {
+          pollCreationMessageKey: { remoteJid: poll.key.remoteJid, fromMe: poll.key.fromMe, id: msgId, participant: poll.key.participant },
+          vote,
+          senderTimestampMs: at
+        }
+      },
+      { userJid: sock.user!.id }
+    )
+    await sock.relayMessage(poll.key.remoteJid!, msg.message!, { messageId: msg.key.id! })
+    putPollVote(poll, { pollUpdateMessageKey: { remoteJid: poll.key.remoteJid, fromMe: true, id: msg.key.id }, vote: { selectedOptions }, senderTimestampMs: at })
+    this.store.markChat(chatId)
+    this.queueMsg(chatId, poll)
+  }
+
   async react(chatId: string, msgId: string, emoji: string) {
     const sock = this.requireOpen()
     const target = this.store.getMessage(chatId, msgId)
@@ -1951,6 +2054,9 @@ function toBuf(x: unknown): Buffer | undefined {
 }
 
 /** sendMessage only resolves once WhatsApp's server took the message: that's the ✓ (Baileys leaves it "pending") */
+/** WhatsApp lets you edit a sent message for 15 minutes */
+const EDIT_WINDOW = 15 * 60_000
+
 function markSent(m: WAMessage): WAMessage {
   if ((m.status ?? 0) < proto.WebMessageInfo.Status.SERVER_ACK) m.status = proto.WebMessageInfo.Status.SERVER_ACK
   return m

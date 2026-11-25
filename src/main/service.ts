@@ -49,6 +49,9 @@ export interface ChatService {
   sendSticker(chatId: string, stickerId: string): Promise<void>
   resend(chatId: string, msgId: string): Promise<void>
   react(chatId: string, msgId: string, emoji: string): Promise<void>
+  editMessage(chatId: string, msgId: string, text: string): Promise<void>
+  votePoll(chatId: string, msgId: string, options: number[]): Promise<void>
+  sendPoll(chatId: string, name: string, options: string[], multi: boolean): Promise<void>
   read(chatId: string, force?: boolean): Promise<void>
   typing(chatId: string, on: boolean): Promise<void>
   chatAction(chatId: string, a: ChatAction): Promise<void>

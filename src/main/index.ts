@@ -932,6 +932,9 @@ function registerIpc() {
     return r.filePath
   })
   ipcMain.handle('react', (_e, chatId: string, msgId: string, emoji: string) => wa.react(chatId, msgId, emoji))
+  ipcMain.handle('editMessage', (_e, chatId: string, msgId: string, text: string) => wa.editMessage(chatId, msgId, text))
+  ipcMain.handle('votePoll', (_e, chatId: string, msgId: string, options: number[]) => wa.votePoll(chatId, msgId, options))
+  ipcMain.handle('sendPoll', (_e, chatId: string, name: string, options: string[], multi: boolean) => wa.sendPoll(chatId, name, options, multi))
   ipcMain.handle('read', (_e, chatId: string) => (win?.isFocused() && !lock.locked ? wa.read(chatId) : undefined))
   ipcMain.handle('typing', (_e, chatId: string, on: boolean) => wa.typing(chatId, on))
   ipcMain.handle('chatAction', (_e, chatId: string, a: ChatAction) => wa.chatAction(chatId, a))

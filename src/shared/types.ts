@@ -61,6 +61,26 @@ export interface UiMessage {
   link?: { url: string; title?: string; description?: string; thumb?: string }
 }
 
+export interface SharedLink {
+  id: string
+  msgId: string
+  url: string
+  title?: string
+  description?: string
+  thumb?: string
+  text?: string
+  senderName?: string
+  fromMe: boolean
+  ts: number
+}
+
+export interface SharedItems {
+  media: UiMessage[]
+  docs: UiMessage[]
+  links: SharedLink[]
+  totalMsgs: number
+}
+
 export interface LinkMeta {
   url: string
   /** og:site_name or hostname */
@@ -289,6 +309,8 @@ export type ChatAction =
 export interface ZapApi {
   init(): Promise<InitPayload>
   messages(chatId: string, beforeTs?: number): Promise<{ messages: UiMessage[]; hasMore: boolean }>
+  /** photos, videos, links and documents stored for a chat (newest first) */
+  shared(chatId: string): Promise<SharedItems>
   /** last few messages for the hover preview: doesn't mark as read or fetch history */
   peek(chatId: string): Promise<UiMessage[]>
   /** download media in the background (visible photos/videos) so opening them is instant */

@@ -28,9 +28,9 @@ import makeWASocket, {
   type WAMessageKey,
   type WASocket
 } from 'baileys'
-import type { ChatAction, ConnState, FavSticker, MainEvent, Reminder, ScheduledMsg, UiChat, UiMessage } from '@shared/types'
+import type { ChatAction, ConnState, FavSticker, MainEvent, Reminder, ScheduledMsg, SharedItems, SharedLink, UiChat, UiMessage } from '@shared/types'
 import { Store, tsOf, type ChatRec, type StickerRec } from './store'
-import { contentOf, isInvisible, previewOf, stickerIdOf, toUi, unwrapEdit, voicePreview } from './normalize'
+import { contentOf, extractUrls, isCiphertext, isInvisible, isRevokeStub, previewOf, stickerIdOf, stubTextOf, toUi, unwrapEdit, voicePreview } from './normalize'
 import { getLinkMeta } from './links'
 
 const BATCH_MS = 40
@@ -54,6 +54,19 @@ const isMuted = (c: ChatRec) => {
   if (!m) return false
   if (m < 0) return true
   return (m < 1e12 ? m * 1000 : m) > Date.now()
+}
+
+/**
+ * Normalizes a Baileys muteEndTime value.
+ * In app-state sync actions (chats.update), muted=true with no muteEndTimestamp produces 0 (unmuted produces null);
+ * in history snapshots (proto.Conversation), 0 means not muted.
+ */
+const parseMute = (val: unknown, fromSyncAction: boolean): number | undefined => {
+  if (val == null) return undefined
+  const n = typeof val === 'object' && val && 'toNumber' in (val as any) ? (val as any).toNumber() : Number(val)
+  if (!Number.isFinite(n)) return undefined
+  if (n === 0) return fromSyncAction ? -1 : undefined
+  return n < 0 ? -1 : n
 }
 
 const extOf = (mime?: string) => {
@@ -372,7 +385,10 @@ export class WaService implements ChatService {
     return c
   }
 
-  private ingest(m: WAMessage, live: boolean) {
+  private ingest(m: WAMessage, source: boolean | 'notify' | 'append' | 'history') {
+    const mode = source === true ? 'notify' : source === false ? 'history' : source
+    const live = mode === 'notify'
+    const incoming = mode !== 'history'
     if (!m.key?.id || !m.key.remoteJid) return
     const chatId = this.chatIdOf(m.key)
     if (this.skip(chatId)) return
@@ -406,30 +422,41 @@ export class WaService implements ChatService {
       else if (c.notify !== m.pushName) c.notify = m.pushName
     }
 
+    const prev = this.store.getMessage(chatId, m.key.id)
+    const resolvedPlaceholder = !!prev && isCiphertext(prev) && !!content
+    const isCipher = isCiphertext(m)
     const isNew = this.store.putMessage(chatId, m)
     const chat = this.chat(chatId)
     const ts = tsOf(m)
     if (ts >= chat.ts || chat.lastMsgId === m.key.id) this.setPreview(chat, m)
-    if (live && isNew && !m.key.fromMe) {
+    const alreadyRead = (m.status ?? 0) >= proto.WebMessageInfo.Status.READ
+    if (incoming && (isNew || resolvedPlaceholder) && !m.key.fromMe && !alreadyRead) {
       const looking = this.activeChat === chatId && this.focused && !this.screenLocked
-      if (looking) void this.read(chatId)
-      else chat.unread = (chat.unread || 0) + 1
-      if (!looking && !isMuted(chat) && this.onIncoming) {
-        this.onIncoming({
-          chat,
-          chatName: this.chatName(chat),
-          senderName: isJidGroup(chatId) && sender ? this.name(sender, m.pushName) : undefined,
-          preview: previewOf(content) || 'Nova mensagem',
-          msg: m
-        })
-      }
-      // a voice note in a chat that isn't open: the renderer transcribes it now (open chats get it via 'msgs')
-      if (!this.loaded.has(chatId)) {
-        const ui = this.uiMsg(chatId, m)
-        if (ui.kind === 'audio' && ui.ptt) this.emit({ type: 'voiceIn', message: ui })
+      if (!isCipher) {
+        // count first so read() sees unread >= 1 even when the chat was already open (otherwise it returned early and never sent the read receipt!)
+        if (isNew || (resolvedPlaceholder && !chat.unread)) chat.unread = (chat.unread || 0) + 1
+        if (looking) void this.read(chatId)
+        // don't pop a late desktop toast for offline catch-up ('append'), old placeholders, muted or archived chats
+        const fresh = !resolvedPlaceholder || Date.now() - ts < 5 * 60_000
+        if (live && !looking && fresh && !isMuted(chat) && !chat.archived && this.onIncoming) {
+          this.onIncoming({
+            chat,
+            chatName: this.chatName(chat),
+            senderName: isJidGroup(chatId) && sender ? this.name(sender, m.pushName) : undefined,
+            preview: previewOf(content) || 'Nova mensagem',
+            msg: m
+          })
+        }
+        // a voice note in a chat that isn't open: the renderer transcribes it now (open chats get it via 'msgs')
+        if (live && !this.loaded.has(chatId)) {
+          const ui = this.uiMsg(chatId, m)
+          if (ui.kind === 'audio' && ui.ptt) this.emit({ type: 'voiceIn', message: ui })
+        }
+      } else if (!looking && isNew) {
+        chat.unread = (chat.unread || 0) + 1
       }
     }
-    if (m.key.fromMe && live) {
+    if (m.key.fromMe && incoming) {
       chat.unread = 0
       chat.markedUnread = false
     }
@@ -440,11 +467,104 @@ export class WaService implements ChatService {
   private setPreview(chat: ChatRec, m: WAMessage) {
     chat.ts = Math.max(chat.ts, tsOf(m))
     chat.lastMsgId = m.key.id!
-    const deleted = (m as any)._deleted
-    chat.preview = deleted ? '🚫 Mensagem apagada' : previewOf(contentOf(m)) || chat.preview
-    chat.previewFromMe = !!m.key.fromMe
+    const deleted = !!(m as any)._deleted || isRevokeStub(m)
+    const cipher = isCiphertext(m)
+    const content = contentOf(m)
     const s = m.key.participant || m.participant
-    chat.previewSender = isJidGroup(chat.id) && s && !m.key.fromMe ? this.name(s, m.pushName).split(' ')[0] : undefined
+    const senderLabel = isJidGroup(chat.id) && s && !m.key.fromMe ? this.name(s, m.pushName).split(' ')[0] : undefined
+    if (deleted) {
+      chat.preview = '🚫 Mensagem apagada'
+      chat.previewFromMe = !!m.key.fromMe
+      chat.previewSender = senderLabel
+    } else if (cipher) {
+      chat.preview = '🔒 Aguardando mensagem…'
+      chat.previewFromMe = !!m.key.fromMe
+      chat.previewSender = senderLabel
+    } else if (content) {
+      chat.preview = previewOf(content) || 'Mensagem'
+      chat.previewFromMe = !!m.key.fromMe
+      chat.previewSender = senderLabel
+    } else {
+      // system event (group renamed, participant joined/left…): never inherit the previous message's preview or sender
+      const st = stubTextOf(m)
+      chat.preview = st || undefined
+      chat.previewFromMe = false
+      chat.previewSender = undefined
+    }
+  }
+
+  /** keeps the sidebar preview honest when a chat's newest message is a stub or was repaired */
+  private syncPreview(chatId: string) {
+    const chat = this.store.chats.get(chatId)
+    if (!chat) return
+    const all = this.store.sorted(chatId)
+    let latest: WAMessage | undefined
+    for (let i = all.length - 1; i >= 0; i--) {
+      if (!isInvisible(all[i])) {
+        latest = all[i]
+        break
+      }
+    }
+    const prev = { p: chat.preview, s: chat.previewSender, f: chat.previewFromMe, id: chat.lastMsgId }
+    if (latest) {
+      this.setPreview(chat, latest)
+    } else if (!chat.preview && chat.previewSender) {
+      chat.previewSender = undefined
+      chat.previewFromMe = false
+    }
+    if (chat.preview !== prev.p || chat.previewSender !== prev.s || chat.previewFromMe !== prev.f || chat.lastMsgId !== prev.id) {
+      this.queueChat(chatId)
+    }
+  }
+
+  /** one-time cleanup: fixes previews corrupted by undecrypted/system stubs keeping the previous message's text */
+  private repairPreviews() {
+    const done = new Set(this.store.meta.migrations ?? [])
+    if (done.has('preview-stub-fix-v1')) return
+    const recent = [...this.store.chats.values()]
+      .sort((a, b) => b.ts - a.ts)
+      .slice(0, 60)
+      .map((c) => c.id)
+    const broken = [...this.store.chats.values()].filter((c) => !c.preview && c.previewSender).map((c) => c.id)
+    const ids = new Set([...recent, ...broken])
+    for (const id of ids) {
+      this.safe(() => {
+        this.syncPreview(id)
+        const last = this.store.sorted(id).slice(-5)
+        this.retryPlaceholders(id, last)
+      })
+    }
+    done.add('preview-stub-fix-v1')
+    this.store.meta.migrations = [...done]
+    this.store.markMeta()
+  }
+
+  /** asks our own phone to resend recent undecrypted (CIPHERTEXT) messages via PDO */
+  private placeholderAsked = new Map<string, number>()
+  private retryPlaceholders(_chatId: string, list: WAMessage[]) {
+    if (this.conn !== 'open' || !this.sock) return
+    const now = Date.now()
+    const recent = now - 14 * 86400_000
+    for (const m of list.slice(-30)) {
+      if (!m.key.id || !isCiphertext(m) || tsOf(m) < recent) continue
+      const last = this.placeholderAsked.get(m.key.id) ?? 0
+      if (now - last < 60_000) continue
+      this.placeholderAsked.set(m.key.id, now)
+      const cleanKey: WAMessageKey = {
+        remoteJid: m.key.remoteJid,
+        fromMe: m.key.fromMe,
+        id: m.key.id,
+        participant: m.key.participant
+      }
+      this.sock
+        .requestPlaceholderResend(cleanKey, {
+          key: m.key,
+          messageTimestamp: m.messageTimestamp,
+          pushName: m.pushName,
+          participant: m.participant
+        })
+        .catch(() => {})
+    }
   }
 
   private applyReaction(chatId: string, msgId: string, who: string, text: string) {
@@ -600,10 +720,12 @@ export class WaService implements ChatService {
    * (it used to be stored as the total and then +1'd again: every new message showed as 2).
    */
   private pendingArchive = new Map<string, { archived: boolean; conditional: (data: any) => boolean | undefined }>()
+  private pendingMute = new Map<string, unknown>()
+  private pendingPin = new Map<string, unknown>()
   private archiveTimer?: NodeJS.Timeout
   private flushArchiveSoon() {
     if (this.archiveTimer) clearTimeout(this.archiveTimer)
-    // wait for the history that lands alongside: the "new messages since archiving" check needs it
+    // wait for the history that lands alongside: the "new messages since archiving" check & LID maps need it
     this.archiveTimer = setTimeout(() => this.safe(() => this.flushArchive()), 6000)
   }
   private flushArchive() {
@@ -620,20 +742,40 @@ export class WaService implements ChatService {
       this.queueChat(id)
     }
     this.pendingArchive.clear()
+    for (const [raw, muteEndTime] of this.pendingMute) {
+      const id = this.canon(raw)
+      if (this.skip(id)) continue
+      const rec = this.chat(id)
+      rec.muteUntil = parseMute(muteEndTime, true)
+      this.queueChat(id)
+    }
+    this.pendingMute.clear()
+    for (const [raw, pinned] of this.pendingPin) {
+      const id = this.canon(raw)
+      if (this.skip(id)) continue
+      const rec = this.chat(id)
+      rec.waPinned = pinned ? Number(pinned) : undefined
+      this.queueChat(id)
+    }
+    this.pendingPin.clear()
   }
 
-  /** one time: the archive list that got lost in the first sync is fetched again from the phone */
+  /** one time: archive + mute lists that got dropped by Baileys' conditional buffer in the first sync are fetched again */
   private async resyncArchives(sock: WASocket) {
     const done = new Set(this.store.meta.migrations ?? [])
-    if (done.has('archive-resync-v1')) return
+    const need: ('regular_low' | 'regular_high')[] = []
+    if (!done.has('archive-resync-v1')) need.push('regular_low')
+    if (!done.has('mute-resync-v1')) need.push('regular_high')
+    if (!need.length) return
     await new Promise((r) => setTimeout(r, 8000))
     if (sock !== this.sock || this.conn !== 'open') return
     try {
       const keys = (sock as any)._authState?.keys
-      // forget the saved version → WhatsApp sends the full snapshot again (archive + pins)
-      await keys?.set({ 'app-state-sync-version': { regular_low: null } })
-      await sock.resyncAppState(['regular_low'], true)
-      done.add('archive-resync-v1')
+      // forget the saved version → WhatsApp sends the full snapshot again (archive+pins in regular_low, mutes in regular_high)
+      await keys?.set({ 'app-state-sync-version': Object.fromEntries(need.map((n) => [n, null])) })
+      await sock.resyncAppState(need, true)
+      if (need.includes('regular_low')) done.add('archive-resync-v1')
+      if (need.includes('regular_high')) done.add('mute-resync-v1')
       this.store.meta.migrations = [...done]
       this.store.markMeta()
     } catch (err) {
@@ -641,7 +783,7 @@ export class WaService implements ChatService {
     }
   }
 
-  private applyChat(c: Partial<Chat> & { id?: string | null }, history = false) {
+  private applyChat(c: Partial<Chat> & { id?: string | null }, history = false, fromUpdate = false) {
     if (!c.id) return
     this.mapLid(c.id, (c as any).pnJid)
     this.mapLid((c as any).lidJid, c.id)
@@ -657,10 +799,11 @@ export class WaService implements ChatService {
         rec.markedUnread = false
       } else if (history) rec.unread = c.unreadCount
     }
-    if ('pinned' in c) rec.waPinned = c.pinned ? Number(c.pinned) : undefined
-    // conditional archive flags are decided in flushArchive()
-    if ('archived' in c && c.archived != null && !(c as any).conditional) rec.archived = !!c.archived || undefined
-    if ('muteEndTime' in c) rec.muteUntil = c.muteEndTime ? Number(c.muteEndTime) : undefined
+    const conditional = !!(c as any).conditional
+    // conditional flags from initial app-state sync are handled via pending* in flushArchive()
+    if ('pinned' in c && !conditional) rec.waPinned = c.pinned ? Number(c.pinned) : undefined
+    if ('archived' in c && c.archived != null && !conditional) rec.archived = !!c.archived || undefined
+    if ('muteEndTime' in c && !conditional) rec.muteUntil = parseMute(c.muteEndTime, fromUpdate)
     if (c.conversationTimestamp) rec.ts = Math.max(rec.ts, Number(c.conversationTimestamp) * 1000)
     if ((c as any).markedAsUnread) rec.markedUnread = true
     this.queueChat(id)
@@ -747,15 +890,31 @@ export class WaService implements ChatService {
     })
     this.sock = sock
     ;(sock as any)._authState = state
-    // Archive flags of the first app-state sync come as "conditional" chat updates that Baileys keeps
-    // buffered forever when the chat isn't in the history batch (old chats = exactly the archived ones).
-    // Catch them at the source and decide ourselves.
+    // Archive/mute/pin flags of the first app-state sync (and resyncs) come as "conditional" chat updates that
+    // Baileys keeps buffered forever when the chat isn't in the same history batch. Catch them at the source.
     const rawEmit = sock.ev.emit.bind(sock.ev)
     ;(sock.ev as any).emit = (event: string, data: any) => {
       if (event === 'chats.update' && Array.isArray(data)) {
         for (const u of data) {
-          if (u?.id && typeof u.conditional === 'function' && typeof u.archived === 'boolean') {
+          if (!u?.id || typeof u.conditional !== 'function') continue
+          if (typeof u.archived === 'boolean') {
             this.pendingArchive.set(u.id, { archived: u.archived, conditional: u.conditional })
+            this.flushArchiveSoon()
+          }
+          if ('muteEndTime' in u) {
+            if (!String(u.id).endsWith('@lid')) {
+              const id = this.canon(u.id)
+              if (!this.skip(id)) {
+                this.chat(id).muteUntil = parseMute(u.muteEndTime, true)
+                this.queueChat(id)
+              }
+            } else {
+              this.pendingMute.set(u.id, u.muteEndTime ?? null)
+              this.flushArchiveSoon()
+            }
+          }
+          if ('pinned' in u) {
+            this.pendingPin.set(u.id, u.pinned ?? null)
             this.flushArchiveSoon()
           }
         }
@@ -801,7 +960,7 @@ export class WaService implements ChatService {
       if (events['contacts.upsert']) this.upsertContacts(events['contacts.upsert'])
       if (events['contacts.update']) this.upsertContacts(events['contacts.update'])
       if (events['chats.upsert']) for (const c of events['chats.upsert']) this.applyChat(c)
-      if (events['chats.update']) for (const c of events['chats.update']) this.applyChat(c as any)
+      if (events['chats.update']) for (const c of events['chats.update']) this.applyChat(c as any, false, true)
       if (events['chats.delete']) {
         const ids = events['chats.delete'].map((j) => this.canon(j))
         for (const id of ids) this.store.removeChat(id)
@@ -809,7 +968,7 @@ export class WaService implements ChatService {
         this.emit({ type: 'chatsRemoved', ids })
       }
       const up = events['messages.upsert']
-      if (up) for (const m of up.messages) this.safe(() => this.ingest(m, up.type === 'notify'))
+      if (up) for (const m of up.messages) this.safe(() => this.ingest(m, up.type === 'notify' ? 'notify' : 'append'))
       const readByChat = new Map<string, string[]>()
       const readHere = (chatId: string, id: string) => readByChat.set(chatId, [...(readByChat.get(chatId) ?? []), id])
       if (events['messages.update']) {
@@ -818,7 +977,15 @@ export class WaService implements ChatService {
           const chatId = this.chatIdOf(key)
           const target = this.store.getMessage(chatId, key.id)
           if (update.message?.editedMessage) this.applyEdit(chatId, key.id, update.message.editedMessage as any)
-          if ((update.message === null && update.messageStubType) || update.messageStubType === proto.WebMessageInfo.StubType.REVOKE) {
+          else if (target && isCiphertext(target) && update.message) {
+            this.safe(() => this.ingest({ ...target, ...update, message: update.message } as WAMessage, true))
+            continue
+          }
+          if (
+            update.messageStubType === proto.WebMessageInfo.StubType.REVOKE ||
+            update.messageStubType === proto.WebMessageInfo.StubType.ADMIN_REVOKE ||
+            (update.message === null && update.messageStubType && update.messageStubType !== proto.WebMessageInfo.StubType.CIPHERTEXT)
+          ) {
             this.markDeleted(chatId, key.id)
             continue
           }
@@ -915,6 +1082,8 @@ export class WaService implements ChatService {
     this.stopped = true
     if (this.timer) clearInterval(this.timer)
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
+    for (const t of this.markReadTimers.values()) clearTimeout(t)
+    this.markReadTimers.clear()
     if (logout) await this.sock?.logout().catch(() => {})
     try {
       this.sock?.end(undefined)
@@ -935,6 +1104,8 @@ export class WaService implements ChatService {
       if (this.me?.lid) this.mapLid(this.me.lid, this.me.id)
       this.fixSelfChat()
       this.setConn('open')
+      this.repairPreviews()
+      this.flushPendingReads()
       void this.resyncArchives(sock)
       void this.setOnline(this.focused)
       sock
@@ -1020,6 +1191,8 @@ export class WaService implements ChatService {
 
   shutdown() {
     this.stopped = true
+    for (const t of this.markReadTimers.values()) clearTimeout(t)
+    this.markReadTimers.clear()
     this.store.flush()
     try {
       this.sock?.end(undefined)
@@ -1048,9 +1221,13 @@ export class WaService implements ChatService {
 
   getMessages(chatId: string, beforeTs?: number) {
     this.loaded.add(chatId)
-    if (!beforeTs) this.safe(() => this.applyStoredEdits(chatId))
+    if (!beforeTs) {
+      this.safe(() => this.applyStoredEdits(chatId))
+      this.safe(() => this.syncPreview(chatId))
+    }
     const fav = this.favIds()
     const all = this.store.sorted(chatId).filter((m) => !isInvisible(m) || (m as any)._deleted)
+    if (!beforeTs) this.safe(() => this.retryPlaceholders(chatId, all))
     let end = all.length
     if (beforeTs) {
       end = all.findIndex((m) => tsOf(m) >= beforeTs)
@@ -1069,6 +1246,66 @@ export class WaService implements ChatService {
       }
     }
     return { messages: page.map((m) => this.uiMsg(chatId, m, fav)), hasMore }
+  }
+
+  /** photos, videos, documents and links stored for this chat, newest first */
+  getShared(chatId: string): SharedItems {
+    const all = this.store.sorted(chatId)
+    const fav = this.favIds()
+    const media: UiMessage[] = []
+    const docs: UiMessage[] = []
+    const links: SharedLink[] = []
+    for (let i = all.length - 1; i >= 0; i--) {
+      const m = all[i]
+      if (!m.key?.id || (m as any)._deleted || isRevokeStub(m) || isCiphertext(m) || isInvisible(m)) continue
+      const c = contentOf(m)
+      if (!c) continue
+      const type = getContentType(c)
+      const isMedia = type === 'imageMessage' || type === 'videoMessage' || type === 'ptvMessage'
+      const isDoc = type === 'documentMessage'
+      const rawText =
+        type === 'conversation'
+          ? c.conversation
+          : type === 'extendedTextMessage'
+            ? c.extendedTextMessage?.text
+            : type === 'imageMessage'
+              ? c.imageMessage?.caption
+              : type === 'videoMessage'
+                ? c.videoMessage?.caption
+                : type === 'documentMessage'
+                  ? c.documentMessage?.caption
+                  : undefined
+      const embeddedUrl = type === 'extendedTextMessage' ? ((c.extendedTextMessage as any)?.canonicalUrl || c.extendedTextMessage?.matchedText) : undefined
+      const urls = extractUrls(rawText ?? undefined)
+      if (embeddedUrl) {
+        const norm = /^https?:\/\//i.test(embeddedUrl) ? embeddedUrl : 'https://' + embeddedUrl
+        if (!urls.includes(norm)) urls.unshift(norm)
+      }
+      if (!isMedia && !isDoc && !urls.length) continue
+      const ui = this.uiMsg(chatId, m, fav)
+      if (isMedia && media.length < 600) media.push(ui)
+      if (isDoc && docs.length < 400) docs.push(ui)
+      if (urls.length && links.length < 400) {
+        for (let u = 0; u < urls.length && links.length < 400; u++) {
+          const url = urls[u]
+          const match = ui.link && (ui.link.url === url || u === 0) ? ui.link : undefined
+          links.push({
+            id: ui.id + ':' + u,
+            msgId: ui.id,
+            url,
+            title: match?.title,
+            description: match?.description,
+            thumb: match?.thumb,
+            text: ui.text && ui.text.trim() !== url ? ui.text.slice(0, 180) : undefined,
+            senderName: ui.fromMe ? 'Você' : ui.senderName,
+            fromMe: ui.fromMe,
+            ts: ui.ts
+          })
+        }
+      }
+      if (media.length >= 600 && docs.length >= 400 && links.length >= 400) break
+    }
+    return { media, docs, links, totalMsgs: all.length }
   }
 
   private requireOpen() {
@@ -1277,11 +1514,38 @@ export class WaService implements ChatService {
 
   /** pending read receipts held back by modo fantasma, sent on "Enviar visto agora" */
   private heldReads = new Map<string, number>()
+  /** chats read while offline/reconnecting (or whose receipt failed): retried as soon as the socket opens */
+  private pendingReads = new Map<string, number>()
+  private markReadTimers = new Map<string, NodeJS.Timeout>()
+
+  private flushPendingReads() {
+    if (!this.pendingReads.size || this.ghost.noReadReceipts) return
+    setTimeout(() => {
+      if (this.conn !== 'open' || this.ghost.noReadReceipts) return
+      for (const chatId of [...this.pendingReads.keys()]) void this.read(chatId)
+    }, 1500)
+  }
+
+  /** syncs the chat's read state to the phone (clears the unread badge on mobile, debounced per chat) */
+  private scheduleMarkRead(chatId: string, immediate = false) {
+    const prev = this.markReadTimers.get(chatId)
+    if (prev) clearTimeout(prev)
+    const run = () => {
+      this.markReadTimers.delete(chatId)
+      if (!this.sock || this.conn !== 'open') return
+      const last = this.lastMsg(chatId)
+      if (!last) return
+      void this.sock.chatModify({ markRead: true, lastMessages: [last] }, chatId).catch((err) => logError('markRead', err))
+    }
+    if (immediate) run()
+    else this.markReadTimers.set(chatId, setTimeout(run, 1200))
+  }
 
   async read(chatId: string, force = false) {
     const chat = this.store.chats.get(chatId)
     if (!chat) return
-    const unread = chat.unread + (force ? (this.heldReads.get(chatId) ?? 0) : 0)
+    const pending = this.pendingReads.get(chatId) ?? 0
+    const unread = chat.unread + pending + (force ? (this.heldReads.get(chatId) ?? 0) : 0)
     const wasMarked = chat.markedUnread
     if (!unread && !wasMarked && !force) return
     chat.unread = 0
@@ -1293,16 +1557,30 @@ export class WaService implements ChatService {
       return
     }
     this.heldReads.delete(chatId)
-    if (!this.sock || this.conn !== 'open') return
+    if (!this.sock || this.conn !== 'open') {
+      this.pendingReads.set(chatId, Math.max(pending, unread || 1))
+      return
+    }
+    this.pendingReads.delete(chatId)
     const incoming = this.store
       .sorted(chatId)
-      .filter((m) => !m.key.fromMe && !isInvisible(m))
+      .filter((m) => !m.key.fromMe && !isInvisible(m) && !isCiphertext(m))
       .slice(-Math.max(1, Math.min(unread || 1, 100)))
-    if (incoming.length) await this.sock.readMessages(incoming.map((m) => m.key)).catch(() => {})
-    if (wasMarked) {
-      const last = this.lastMsg(chatId)
-      if (last) await this.sock.chatModify({ markRead: true, lastMessages: [last] }, chatId).catch(() => {})
+    if (incoming.length) {
+      const keys: WAMessageKey[] = incoming.map((m) => ({
+        ...m.key,
+        remoteJid: m.key.remoteJid || chatId,
+        participant: isJidGroup(chatId) ? m.key.participant || m.participant || undefined : m.key.participant || undefined
+      }))
+      try {
+        await this.sock.readMessages(keys)
+      } catch (err) {
+        logError('readMessages', err)
+        this.pendingReads.set(chatId, Math.max(this.pendingReads.get(chatId) ?? 0, unread || 1))
+      }
     }
+    // always sync markChatAsRead to the phone (clears the phone's unread badge for groups, LIDs and 1:1 chats)
+    this.scheduleMarkRead(chatId, !!wasMarked)
   }
 
   async typing(chatId: string, on: boolean) {
@@ -1312,8 +1590,22 @@ export class WaService implements ChatService {
 
   private lastMsg(chatId: string) {
     const list = this.store.sorted(chatId)
-    const m = list[list.length - 1]
-    return m ? { key: m.key, messageTimestamp: m.messageTimestamp } : undefined
+    for (let i = list.length - 1; i >= 0; i--) {
+      const m = list[i]
+      if (!m.key?.id || !m.messageTimestamp) continue
+      const participant = isJidGroup(chatId) && !m.key.fromMe ? m.key.participant || m.participant || undefined : undefined
+      if (isJidGroup(chatId) && !m.key.fromMe && !participant) continue
+      return {
+        key: {
+          remoteJid: chatId,
+          id: m.key.id,
+          fromMe: !!m.key.fromMe,
+          ...(participant ? { participant } : {})
+        },
+        messageTimestamp: m.messageTimestamp
+      }
+    }
+    return undefined
   }
 
   async chatAction(chatId: string, a: ChatAction) {

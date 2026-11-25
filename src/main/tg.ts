@@ -17,9 +17,9 @@ import { getPeerId, strippedPhotoToJpg } from 'telegram/Utils.js'
 import bigInt from 'big-integer'
 import QRCode from 'qrcode'
 import type { WAMessage } from 'baileys'
-import type { ChatAction, ConnState, FavSticker, Folder, MainEvent, MsgKind, Reaction, Reminder, ScheduledMsg, UiChat, UiMessage } from '@shared/types'
+import type { ChatAction, ConnState, FavSticker, Folder, MainEvent, MsgKind, Reaction, Reminder, ScheduledMsg, SharedItems, SharedLink, UiChat, UiMessage } from '@shared/types'
 import { readJson, writeAtomic, type ChatRec, type StickerRec, type Store } from './store'
-import { plain, voicePreview } from './normalize'
+import { extractUrls, plain, voicePreview } from './normalize'
 import { TgFile } from './tgfile'
 import type { ChatService, IncomingInfo } from './service'
 
@@ -907,7 +907,7 @@ export class TgService implements ChatService {
         const looking = this.activeChat === chatId && this.focused && !this.screenLocked
         if (looking) void this.read(chatId)
         else c.unread = (c.unread || 0) + 1
-        if (!looking && !isMuted(c)) {
+        if (!looking && !isMuted(c) && !c.archived) {
           this.onIncoming?.({ chat: c, chatName: this.chatName(c), senderName: c.tg?.t === 'group' ? rec.ui.senderName : undefined, preview: previewOfUi(rec.ui) || 'Nova mensagem' })
         }
         if (rec.ui.kind === 'audio' && rec.ui.ptt && !this.loaded.has(chatId)) this.emit({ type: 'voiceIn', message: this.uiOf(rec) })
@@ -1047,6 +1047,44 @@ export class TgService implements ChatService {
     }
     const fav = this.favIds()
     return { messages: p.list.map((r) => this.uiOf(r, fav)), hasMore: p.start > 0 || !this.historyEnd.has(chatId) }
+  }
+
+  /** photos, videos, documents and links stored for this chat, newest first */
+  getShared(chatId: string): SharedItems {
+    const all = this.visible(chatId)
+    const fav = this.favIds()
+    const media: UiMessage[] = []
+    const docs: UiMessage[] = []
+    const links: SharedLink[] = []
+    for (let i = all.length - 1; i >= 0; i--) {
+      const r = all[i]
+      if (r._deleted || r.ui.kind === 'deleted') continue
+      const ui = this.uiOf(r, fav)
+      if ((ui.kind === 'image' || ui.kind === 'video') && media.length < 600) media.push(ui)
+      if (ui.kind === 'document' && docs.length < 400) docs.push(ui)
+      const urls = extractUrls(ui.text)
+      if (ui.link?.url && !urls.includes(ui.link.url)) urls.unshift(ui.link.url)
+      if (urls.length && links.length < 400) {
+        for (let u = 0; u < urls.length && links.length < 400; u++) {
+          const url = urls[u]
+          const match = ui.link && (ui.link.url === url || u === 0) ? ui.link : undefined
+          links.push({
+            id: ui.id + ':' + u,
+            msgId: ui.id,
+            url,
+            title: match?.title,
+            description: match?.description,
+            thumb: match?.thumb,
+            text: ui.text && ui.text.trim() !== url ? ui.text.slice(0, 180) : undefined,
+            senderName: ui.fromMe ? 'Você' : ui.senderName,
+            fromMe: ui.fromMe,
+            ts: ui.ts
+          })
+        }
+      }
+      if (media.length >= 600 && docs.length >= 400 && links.length >= 400) break
+    }
+    return { media, docs, links, totalMsgs: all.length }
   }
 
   // ---------- sending ----------

@@ -1,6 +1,6 @@
 // What the app needs from a messaging account. WhatsApp (wa.ts) and Telegram (tg.ts) both implement it,
 // so everything above them (window, notifications, lock, renderer) doesn't care which one it is.
-import type { AccountKind, ChatAction, ConnState, FavSticker, Folder, Reminder, ScheduledMsg, UiChat, UiMessage } from '@shared/types'
+import type { AccountKind, ChatAction, ConnState, FavSticker, Folder, Reminder, ScheduledMsg, SharedItems, UiChat, UiMessage } from '@shared/types'
 import type { ChatRec } from './store'
 
 export type { AccountKind }
@@ -41,6 +41,7 @@ export interface ChatService {
   folders(): Folder[]
   peek(chatId: string): UiMessage[] | Promise<UiMessage[]>
   getMessages(chatId: string, beforeTs?: number): { messages: UiMessage[]; hasMore: boolean } | Promise<{ messages: UiMessage[]; hasMore: boolean }>
+  getShared(chatId: string): SharedItems | Promise<SharedItems>
   send(chatId: string, text: string, quotedId?: string, opts?: { noPreview?: boolean }): Promise<void>
   /** a video's sharp preview picture: stored first frame (or Telegram's own thumbnail), null if none yet */
   poster(chatId: string, msgId: string): Promise<string | null>

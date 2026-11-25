@@ -216,7 +216,7 @@ export function App() {
         e.preventDefault()
       } else if (e.key === 'Escape' && s.active && !e.defaultPrevented && (s.settings?.escClosesChat || narrow)) {
         // something else is open → Esc closes that first
-        if (s.settingsOpen || s.replyTo || document.querySelector('.popover, .menu, .lightbox, .scrim, .dialog, .send-sheet')) return
+        if (s.settingsOpen || s.replyTo || s.mediaOpen || document.querySelector('.popover, .menu, .lightbox, .scrim, .dialog, .send-sheet, .media-drawer')) return
         ;(document.activeElement as HTMLElement | null)?.blur()
         void openChat(null)
       }

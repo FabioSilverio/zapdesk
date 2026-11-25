@@ -1,19 +1,20 @@
 import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import { AnimatePresence, motion, useAnimationControls } from 'motion/react'
 import type { UiChat } from '@shared/types'
-import { getState, openChat, orderedChats, setState, toast, useStore, zap } from '../state'
+import { getState, openChat, openChatMedia, orderedChats, setState, toast, useStore, zap } from '../state'
 import { colorOf, initials, listTime } from '../format'
 import { Avatar } from './Avatar'
 import { HoverPeek, peekEnter, peekLeave } from './HoverPeek'
 import { askConfirm, askText, showMenu, type MenuItem } from './overlays'
-import { DownloadIcon, PlaneIcon, Archive, Bell, BellOff, BlockIcon, Check, Chevron, ExportIcon, Gear, Ghost, LockIcon, PinIcon, Plus, Search, Trash, X } from './icons'
+import { DownloadIcon, PlaneIcon, Archive, Bell, BellOff, BlockIcon, Check, Chevron, ExportIcon, Gear, Ghost, LockIcon, PhotoIcon, PinIcon, Plus, Search, Trash, X } from './icons'
 
-type Row = { kind: 'pinned'; chats: UiChat[] } | { kind: 'head'; label: string } | { kind: 'chat'; chat: UiChat; n?: number } | { kind: 'arch'; count: number; open: boolean }
+type Row = { kind: 'pinned'; chats: UiChat[] } | { kind: 'head'; label: string } | { kind: 'chat'; chat: UiChat; n?: number } | { kind: 'arch'; chats: UiChat[]; open: boolean }
 
 export function chatMenu(chat: UiChat): MenuItem[] {
   const sections = getState().settings?.sections ?? []
   const act = (a: Parameters<typeof zap.chatAction>[1]) => void zap.chatAction(chat.id, a).catch((e) => toast(String(e.message ?? e)))
   return [
+    { label: 'Mídias, links e docs', icon: <PhotoIcon size={15} />, onClick: () => openChatMedia(chat.id) },
     { label: chat.pinned ? 'Desafixar' : 'Fixar no topo', icon: <PinIcon size={15} />, onClick: () => act({ pin: !chat.pinned }) },
     {
       label: 'Renomear…',
@@ -223,7 +224,7 @@ const ChatRow = memo(function ChatRow({ chat, active, n, typing }: { chat: UiCha
   useEffect(() => {
     const p = prev.current
     prev.current = { ts: chat.ts, unread: chat.unread }
-    if (chat.unread > p.unread && chat.ts > p.ts && !active && !chat.muted) setFlash((f) => f + 1)
+    if (chat.unread > p.unread && chat.ts > p.ts && !active && !chat.muted && !chat.archived) setFlash((f) => f + 1)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chat.ts, chat.unread])
   return (
@@ -242,6 +243,7 @@ const ChatRow = memo(function ChatRow({ chat, active, n, typing }: { chat: UiCha
         <div className="chat-row-top">
           <span className="chat-name">{chat.name}</span>
           {chat.blocked && <BlockIcon size={12} className="blocked-ic" />}
+          {chat.archived && <Archive size={11} className="dim" />}
           {chat.muted && <BellOff size={12} className="dim" />}
           <span className="chat-time">{listTime(chat.ts)}</span>
         </div>
@@ -486,6 +488,9 @@ export function Sidebar() {
     const groupChats: Record<string, UiChat[]> = {}
     for (const g of o.groups) groupChats[g.label] = g.chats
     let n = o.pinned.length
+    if (o.archived.length) {
+      rows.push({ kind: 'arch', chats: o.archived, open: showArchived })
+    }
     if (pinnedStyle === 'lista' && o.pinned.length) {
       rows.push({ kind: 'pinned', chats: o.pinned })
     }
@@ -495,10 +500,6 @@ export function Sidebar() {
         n++
         rows.push({ kind: 'chat', chat, n: n <= 9 ? n : undefined })
       }
-    }
-    if (o.archived.length) {
-      rows.push({ kind: 'arch', count: o.archived.length, open: showArchived })
-      if (showArchived) for (const chat of o.archived) rows.push({ kind: 'chat', chat })
     }
     return { pinned: o.pinned, rows, groupChats }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -605,9 +606,15 @@ export function Sidebar() {
               {r.label}
             </div>
           ) : r.kind === 'arch' ? (
-            <button key="arch" className="section-head arch" onClick={() => setShowArchived((v) => !v)}>
-              <Archive size={13} /> arquivadas ({r.count}) <Chevron size={12} style={{ transform: r.open ? 'rotate(90deg)' : undefined, transition: 'transform .15s' }} />
-            </button>
+            <div key="arch" className={'arch-section' + (r.open ? ' open' : '')}>
+              <button className="arch-bar" onClick={() => setShowArchived((v) => !v)}>
+                <Archive size={14} />
+                <span className="arch-label">Arquivadas</span>
+                <span className="arch-count">{r.chats.length}</span>
+                <Chevron size={12} style={{ transform: r.open ? 'rotate(90deg)' : undefined, transition: 'transform .15s' }} />
+              </button>
+              {r.open && r.chats.map((chat) => <ChatRow key={chat.id} chat={chat} active={active === chat.id} typing={typingOf(chat.id)} />)}
+            </div>
           ) : (
             <ChatRow key={r.chat.id} chat={r.chat} active={active === r.chat.id} n={r.n} typing={typingOf(r.chat.id)} />
           )

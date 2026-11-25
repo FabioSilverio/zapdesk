@@ -151,7 +151,12 @@ function accountSummaries(): AccountSummary[] {
   return accounts.list.map((info) => {
     const a = live.get(info.id)
     let unread = 0
-    if (a) for (const c of a.store.chats.values()) if (!c.archived && !(c.muteUntil && (c.muteUntil < 0 || c.muteUntil > Date.now()))) unread += c.unread || (c.markedUnread ? 1 : 0)
+    if (a)
+      for (const c of a.store.chats.values()) {
+        const m = c.muteUntil
+        const muted = !!m && (m < 0 || (m < 1e12 ? m * 1000 : m) > Date.now())
+        if (!c.archived && !muted) unread += c.unread || (c.markedUnread ? 1 : 0)
+      }
     const me = a?.wa.me
     const phone = (me ? me.phone || me.id.split('@')[0] : undefined) ?? info.phone
     const kind = info.kind ?? 'wa'
@@ -762,6 +767,7 @@ function registerIpc() {
   })
   ipcMain.on('log', (_e, msg: string) => log('renderer', new Error(String(msg).slice(0, 4000))))
   ipcMain.handle('messages', (_e, chatId: string, beforeTs?: number) => wa.getMessages(chatId, beforeTs))
+  ipcMain.handle('shared', (_e, chatId: string) => wa.getShared(chatId))
   ipcMain.handle('whisperInstall', () => void whisper().install())
   ipcMain.handle('whisperCancel', () => whisper().cancel())
   ipcMain.handle('whisperRemove', () => whisper().remove())

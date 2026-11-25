@@ -228,3 +228,16 @@ export const BlockIcon = (p: P) => (
     <path d="m6.4 6.4 11.2 11.2" />
   </svg>
 )
+export const PhotoIcon = (p: P) => (
+  <svg {...base(p)}>
+    <rect x="3.5" y="4.5" width="17" height="15" rx="2.5" />
+    <circle cx="9" cy="9.5" r="1.4" />
+    <path d="m20.5 15.5-4.8-4.8a1.2 1.2 0 0 0-1.7 0L6.5 18.2" />
+  </svg>
+)
+export const LinkIcon = (p: P) => (
+  <svg {...base(p)}>
+    <path d="M10 13a4.5 4.5 0 0 0 6.4.4l2.2-2.2a4.5 4.5 0 0 0-6.4-6.4l-1.3 1.3" />
+    <path d="M14 11a4.5 4.5 0 0 0-6.4-.4L5.4 12.8a4.5 4.5 0 0 0 6.4 6.4l1.3-1.3" />
+  </svg>
+)

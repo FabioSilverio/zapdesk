@@ -8,11 +8,12 @@ import { Safe } from './Safe'
 import { EmojiPopover, StickerPopover } from './Pickers'
 import { showMenu } from './overlays'
 import { chatMenu, toggleBlock } from './Sidebar'
-import { Back, BlockIcon, Clock, Down, More, Paperclip, PinIcon, Send, Smile, StickerIcon, X } from './icons'
+import { Back, BlockIcon, Clock, Down, More, Paperclip, PhotoIcon, PinIcon, Send, Smile, StickerIcon, X } from './icons'
 import { fmtWhen, pickCustomTime, timeChoices } from '../tools'
 import { firstUrl, hasFormatting, richBlocks } from '../format'
 import { useLinkMeta } from './Links'
 import { SendPreview, cleanError, stageFiles } from './SendPreview'
+import { ChatMedia } from './ChatMedia'
 
 const drafts = new Map<string, string>()
 
@@ -513,6 +514,7 @@ export function ChatView({ chat, narrow }: { chat: UiChat; narrow: boolean }) {
   const thread = useStore((s) => s.threads[chat.id])
   const typing = useStore((s) => s.typing[chat.id])
   const fresh = useStore((s) => s.fresh)
+  const mediaOpen = useStore((s) => s.mediaOpen)
   const [lightbox, setLightbox] = useState<string | null>(null)
   const [reactFor, setReactFor] = useState<{ m: UiMessage; x: number; y: number } | null>(null)
   const [atBottom, setAtBottom] = useState(true)
@@ -573,7 +575,12 @@ export function ChatView({ chat, narrow }: { chat: UiChat; narrow: boolean }) {
             <Back />
           </button>
         )}
-        <div className="chat-title no-drag" onContextMenu={(e) => showMenu(e, chatMenu(chat))}>
+        <div
+          className={'chat-title no-drag clickable' + (mediaOpen ? ' on' : '')}
+          title="Ver mídias, links e docs"
+          onClick={() => setState((s) => ({ mediaOpen: !s.mediaOpen }))}
+          onContextMenu={(e) => showMenu(e, chatMenu(chat))}
+        >
           <Avatar id={chat.id} name={chat.name} size={26} />
           <div className="chat-title-text">
             <span className="chat-title-name">{chat.name}</span>
@@ -587,15 +594,22 @@ export function ChatView({ chat, narrow }: { chat: UiChat; narrow: boolean }) {
                   </span>
                   {typing.who ? `${typing.who} digitando` : 'digitando'}
                 </motion.span>
-              ) : chat.isGroup ? (
+              ) : chat.isGroup || chat.archived ? (
                 <motion.span key="g" className="chat-sub" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
-                  grupo
+                  {chat.isGroup && chat.archived ? 'grupo · arquivada' : chat.archived ? 'arquivada' : 'grupo'}
                 </motion.span>
               ) : null}
             </AnimatePresence>
           </div>
         </div>
         <div className="chat-head-actions no-drag">
+          <button
+            className={'icon-btn' + (mediaOpen ? ' on' : '')}
+            title="Mídias, links e docs"
+            onClick={() => setState((s) => ({ mediaOpen: !s.mediaOpen }))}
+          >
+            <PhotoIcon size={17} />
+          </button>
           <button className={'icon-btn' + (chat.pinned ? ' on' : '')} title={chat.pinned ? 'Desafixar' : 'Fixar'} onClick={() => void zap.chatAction(chat.id, { pin: !chat.pinned })}>
             <PinIcon size={17} />
           </button>
@@ -646,6 +660,7 @@ export function ChatView({ chat, narrow }: { chat: UiChat; narrow: boolean }) {
         <Composer key={'composer:' + chat.id} chat={chat} />
       )}
 
+      <AnimatePresence>{mediaOpen && <ChatMedia key={'media:' + chat.id} chat={chat} onClose={() => setState({ mediaOpen: false })} />}</AnimatePresence>
       <AnimatePresence>{lightbox && <Lightbox src={lightbox} onClose={() => setLightbox(null)} />}</AnimatePresence>
       <AnimatePresence>
         {reactFor && (

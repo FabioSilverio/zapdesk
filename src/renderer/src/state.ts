@@ -37,6 +37,8 @@ export interface State {
   replyTo?: UiMessage
   settingsOpen: boolean
   settingsTab?: string
+  /** shared media/links/docs drawer open for the active chat */
+  mediaOpen: boolean
   /** bumps every time WhatsApp (re)connects: lets failed avatars retry */
   connGen: number
   scheduled: ScheduledMsg[]
@@ -66,6 +68,7 @@ let state: State = {
   fresh: new Set(),
   sync: { progress: null, done: true },
   settingsOpen: false,
+  mediaOpen: false,
   connGen: 0,
   scheduled: [],
   reminders: [],
@@ -133,8 +136,9 @@ export function toast(text: string) {
   setState({ toast: { text, id: Date.now() } })
 }
 
-export async function openChat(id: string | null) {
-  setState({ active: id, replyTo: undefined })
+export async function openChat(id: string | null, opts?: { keepMedia?: boolean }) {
+  const switching = id !== state.active
+  setState({ active: id, replyTo: undefined, ...(switching && !opts?.keepMedia ? { mediaOpen: false } : {}) })
   zap.setActiveChat(id)
   if (!id) return
   void zap.read(id).catch(() => {})
@@ -159,6 +163,11 @@ export async function openChat(id: string | null) {
       s.active
     )
   }))
+}
+
+export function openChatMedia(id: string) {
+  if (state.active !== id) void openChat(id, { keepMedia: true })
+  setState({ mediaOpen: true })
 }
 
 const olderCooldown = new Map<string, number>()

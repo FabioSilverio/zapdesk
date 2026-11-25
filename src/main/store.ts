@@ -250,7 +250,13 @@ export class Store {
     const isNew = !prev
     if (prev) {
       // keep local extras (edits, status) when a duplicate arrives
-      b.msgs.set(id, { ...prev, ...m, message: m.message ?? prev.message, status: Math.max(prev.status ?? 0, m.status ?? 0) } as WAMessage)
+      const merged: any = { ...prev, ...m, message: m.message ?? prev.message, status: Math.max(prev.status ?? 0, m.status ?? 0) }
+      // a CIPHERTEXT placeholder just got its real decrypted message: drop the stale decryption-error stub
+      if (m.message && !m.messageStubType) {
+        delete merged.messageStubType
+        delete merged.messageStubParameters
+      }
+      b.msgs.set(id, merged as WAMessage)
     } else {
       b.msgs.set(id, m)
     }

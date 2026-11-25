@@ -462,7 +462,7 @@ export const Message = memo(function Message({ m, prev, isGroup, fresh, onOpenIm
             </div>
           )}
           <div className="msg-line">
-            <div className={'bubble' + (bare ? ' bare' : '') + (m.kind === 'deleted' ? ' deleted' : '') + (emojiOnly ? ' emoji-only' : '') + (m.kind === 'image' || m.kind === 'video' ? ' has-media' : '')}>
+            <div className={'bubble' + (bare ? ' bare' : '') + (m.kind === 'deleted' ? ' deleted' : '') + (m.kind === 'unknown' ? ' unknown' : '') + (emojiOnly ? ' emoji-only' : '') + (m.kind === 'image' || m.kind === 'video' ? ' has-media' : '')}>
               {m.revoked && <div className="revoked-tag">🚫 {m.fromMe ? 'você apagou pra todos' : 'apagada pra todos'} · guardada pelo Zapdesk</div>}
               {m.quoted && (
                 <div className="quote">

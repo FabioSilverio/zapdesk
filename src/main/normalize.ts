@@ -1,4 +1,4 @@
-import { getContentType, normalizeMessageContent, type WAMessage, type proto } from 'baileys'
+import { getContentType, normalizeMessageContent, proto, type WAMessage } from 'baileys'
 import type { MsgKind, Reaction, UiMessage } from '@shared/types'
 import { tsOf } from './store'
 
@@ -112,10 +112,56 @@ function rawPreviewOf(content: proto.IMessage | undefined | null): string {
   }
 }
 
+const STUB = proto.WebMessageInfo.StubType
+
+/** numeric WebMessageInfo.StubType (history sync sometimes stores the enum name as a string) */
+export function stubTypeOf(m: WAMessage): number | undefined {
+  const raw = (m as any).messageStubType
+  if (typeof raw === 'number') return raw
+  if (typeof raw === 'string' && typeof (STUB as any)[raw] === 'number') return (STUB as any)[raw]
+  return undefined
+}
+
+export function isCiphertext(m: WAMessage): boolean {
+  return !normalizeMessageContent(m.message ?? undefined) && stubTypeOf(m) === STUB.CIPHERTEXT
+}
+
+export function isRevokeStub(m: WAMessage): boolean {
+  const s = stubTypeOf(m)
+  return s === STUB.REVOKE || s === STUB.ADMIN_REVOKE
+}
+
+const STUB_TEXT: Record<number, string> = {
+  [STUB.REVOKE]: 'Mensagem apagada',
+  [STUB.ADMIN_REVOKE]: 'Mensagem apagada por um admin',
+  [STUB.GROUP_CREATE]: 'Grupo criado',
+  [STUB.GROUP_CHANGE_SUBJECT]: 'Assunto do grupo alterado',
+  [STUB.GROUP_CHANGE_ICON]: 'Ícone do grupo alterado',
+  [STUB.GROUP_PARTICIPANT_ADD]: 'Participante adicionado',
+  [STUB.GROUP_PARTICIPANT_REMOVE]: 'Participante removido',
+  [STUB.GROUP_PARTICIPANT_PROMOTE]: 'Participante promovido a admin',
+  [STUB.GROUP_PARTICIPANT_DEMOTE]: 'Admin removido',
+  [STUB.GROUP_PARTICIPANT_INVITE]: 'Participante convidado',
+  [STUB.GROUP_PARTICIPANT_LEAVE]: 'Participante saiu',
+  [STUB.CHANGE_EPHEMERAL_SETTING]: 'Mensagens temporárias alteradas',
+  [STUB.DISAPPEARING_MODE]: 'Mensagens temporárias alteradas'
+}
+
+export function stubTextOf(m: WAMessage): string {
+  const s = stubTypeOf(m)
+  if (s == null) return ''
+  if (s === STUB.GROUP_CHANGE_SUBJECT && m.messageStubParameters?.[0]) return `Assunto alterado para "${m.messageStubParameters[0]}"`
+  return STUB_TEXT[s] ?? ''
+}
+
 /** messages we never show as bubbles */
 export function isInvisible(m: WAMessage): boolean {
   const c = normalizeMessageContent(m.message ?? undefined)
-  if (!c) return !m.messageStubType
+  if (!c) {
+    if ((m as any)._deleted) return false
+    const s = stubTypeOf(m)
+    return !(s != null && (s === STUB.CIPHERTEXT || s in STUB_TEXT))
+  }
   const type = getContentType(c)
   return (
     type === 'protocolMessage' ||
@@ -129,20 +175,6 @@ export function isInvisible(m: WAMessage): boolean {
     type === 'secretEncryptedMessage' ||
     type === undefined
   )
-}
-
-const STUB_TEXT: Record<number, string> = {
-  1: 'Mensagem apagada',
-  20: 'Grupo criado',
-  21: 'Assunto do grupo alterado',
-  22: 'Ícone do grupo alterado',
-  27: 'Participante adicionado',
-  28: 'Participante removido',
-  29: 'Participante promovido a admin',
-  30: 'Admin removido',
-  31: 'Participante convidado',
-  32: 'Participante saiu',
-  68: 'Mensagens temporárias alteradas'
 }
 
 export interface UiCtx {
@@ -170,12 +202,12 @@ export function toUi(chatId: string, m: WAMessage, { name, canon, reactions, fav
   }
   if (ui.edited) ui.originalText = previewOf(m.message) || undefined
 
-  if ((m as any)._deleted || m.messageStubType === 1) {
+  if ((m as any)._deleted || isRevokeStub(m)) {
     // anti-apagar: we already received the content before the revoke arrived
     const hasContent = !!m.message && !!previewOf(m.message)
     if (!keepDeleted || !hasContent) {
       ui.kind = 'deleted'
-      ui.text = fromMe ? 'Você apagou esta mensagem' : 'Mensagem apagada'
+      ui.text = fromMe ? 'Você apagou esta mensagem' : stubTypeOf(m) === STUB.ADMIN_REVOKE ? 'Mensagem apagada por um admin' : 'Mensagem apagada'
       return ui
     }
     ui.revoked = true
@@ -183,10 +215,16 @@ export function toUi(chatId: string, m: WAMessage, { name, canon, reactions, fav
 
   const c = contentOf(m)
   if (!c) {
-    if (m.messageStubType) {
+    if (stubTypeOf(m) === STUB.CIPHERTEXT) {
+      // couldn't decrypt yet (missing Signal session / key): show as a real bubble from the sender until retry/resend arrives
+      ui.kind = 'unknown'
+      ui.text = '🔒 Aguardando esta mensagem… (se não carregar, abra no celular)'
+      return ui
+    }
+    const st = stubTextOf(m)
+    if (st) {
       ui.kind = 'system'
-      ui.text = STUB_TEXT[m.messageStubType] ?? ''
-      if (m.messageStubType === 21 && m.messageStubParameters?.[0]) ui.text = `Assunto alterado para "${m.messageStubParameters[0]}"`
+      ui.text = st
     }
     return ui
   }
@@ -353,4 +391,21 @@ export function voicePreview(preview: string | undefined, transcript: string | f
   if (!transcript || !preview?.startsWith('🎤')) return preview
   const t = transcript.length > 140 ? transcript.slice(0, 140) + '…' : transcript
   return '🎤 “' + t + '”'
+}
+
+const URL_RE = /\b(?:https?:\/\/|www\.)[^\s<]+[^\s<.,:;"')\]!?]/gi
+
+/** extracts unique normalized http(s) URLs from a message's text */
+export function extractUrls(text?: string): string[] {
+  if (!text || !/https?:\/\/|www\./i.test(text)) return []
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const m of text.matchAll(URL_RE)) {
+    const raw = m[0]
+    const url = /^https?:\/\//i.test(raw) ? raw : 'https://' + raw
+    if (seen.has(url)) continue
+    seen.add(url)
+    out.push(url)
+  }
+  return out
 }

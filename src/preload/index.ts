@@ -6,6 +6,7 @@ const inv = (ch: string) => (...args: unknown[]) => ipcRenderer.invoke(ch, ...ar
 const api: ZapApi = {
   init: inv('init') as ZapApi['init'],
   messages: inv('messages') as ZapApi['messages'],
+  shared: inv('shared') as ZapApi['shared'],
   peek: inv('peek') as ZapApi['peek'],
   prefetch: (chatId, msgId, urgent) => ipcRenderer.send('prefetch', chatId, msgId, !!urgent),
   installUpdate: inv('installUpdate') as ZapApi['installUpdate'],

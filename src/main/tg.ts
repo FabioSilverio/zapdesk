@@ -17,7 +17,7 @@ import { getPeerId, strippedPhotoToJpg } from 'telegram/Utils.js'
 import bigInt from 'big-integer'
 import QRCode from 'qrcode'
 import type { WAMessage } from 'baileys'
-import type { ChatAction, ConnState, FavSticker, Folder, MainEvent, MsgKind, PollInfo, Reaction, Reminder, ScheduledMsg, SharedItems, SharedLink, UiChat, UiMessage } from '@shared/types'
+import type { ChatAction, ConnState, FavSticker, Folder, MainEvent, MsgKind, PersonInfo, PollInfo, Reaction, Reminder, ScheduledMsg, SharedItems, SharedLink, UiChat, UiMessage } from '@shared/types'
 import { readJson, writeAtomic, type ChatRec, type StickerRec, type Store } from './store'
 import { extractUrls, plain, voicePreview } from './normalize'
 import { TgFile } from './tgfile'
@@ -1187,6 +1187,18 @@ export class TgService implements ChatService {
     if (!rec) return
     if (rec.ui.kind === 'text' && rec.ui.text) await this.send(chatId, rec.ui.text)
     else await this.requireOpen().forwardMessages(await this.peer(chatId), { messages: [Number(msgId)], fromPeer: await this.peer(chatId) })
+  }
+
+  async person(id: string, pushName?: string): Promise<PersonInfo> {
+    const c = this.store.contacts.get(id)
+    const digits = c?.phoneNumber?.replace(/\D/g, '')
+    return {
+      id,
+      name: c?.name || this.store.chats.get(id)?.name || pushName || 'Contato',
+      savedName: c?.name || undefined,
+      phone: digits ? '+' + digits : undefined,
+      phoneRaw: digits ? '+' + digits : undefined
+    }
   }
 
   async editMessage(chatId: string, msgId: string, text: string) {

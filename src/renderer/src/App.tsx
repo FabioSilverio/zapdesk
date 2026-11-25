@@ -8,6 +8,7 @@ import { LockScreen, PinSetup } from './components/Lock'
 import { Login } from './components/Login'
 import { SettingsModal, updateSettings } from './components/Settings'
 import { OverlayHost } from './components/overlays'
+import { PersonCardHost } from './components/People'
 import { preloadEmoji } from './components/Pickers'
 import { Safe } from './components/Safe'
 import { onWhisperFailed, onWhisperReady, watchTranscripts } from './transcribe'
@@ -262,6 +263,7 @@ export function App() {
       {/* brand-new install: pick the font first (SF Pro isn't in the public build) */}
       <AnimatePresence>{fontAsk && appearance && !locked && <FontPicker key="font" a={appearance} onDone={() => setFontAsk(false)} />}</AnimatePresence>
       <OverlayHost />
+      <PersonCardHost />
       <Toast />
     </MotionConfig>
   )

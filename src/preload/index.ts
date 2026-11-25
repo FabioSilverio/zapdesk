@@ -39,6 +39,7 @@ const api: ZapApi = {
   resolveNumber: inv('resolveNumber') as ZapApi['resolveNumber'],
   react: inv('react') as ZapApi['react'],
   editMessage: inv('editMessage') as ZapApi['editMessage'],
+  person: inv('person') as ZapApi['person'],
   votePoll: inv('votePoll') as ZapApi['votePoll'],
   sendPoll: inv('sendPoll') as ZapApi['sendPoll'],
   read: inv('read') as ZapApi['read'],

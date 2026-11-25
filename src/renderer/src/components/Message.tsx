@@ -11,7 +11,7 @@ import { Check, Checks, Clock, Copy, Doc, Eye, More, Pause, Pencil, Play, Plus, 
 import { PollBody } from './Poll'
 import { isVoice, transcribeMsg, useTranscript } from '../transcribe'
 import { grabPoster, grabbedPoster, posterUrl } from '../posters'
-import { MentionCtx, openPerson } from './People'
+import { MentionCtx, openPerson, personMenu } from './People'
 
 export const QUICK = ['👍', '❤️', '😂', '😮', '😢', '🙏']
 /** Telegram only accepts its own reaction set (no 😂/😮): closest equivalents */
@@ -456,7 +456,7 @@ export const Message = memo(function Message({ m, prev, isGroup, fresh, onOpenIm
         {showAvatar && (
           <div className="msg-av">
             {!grouped && (
-              <button title={m.fromMe ? 'Você' : `${avatarName} — clique pra conversar em particular`} onClick={() => !m.fromMe && isGroup && openPerson(avatarId, avatarName)}>
+              <button title={m.fromMe ? 'Você' : `${avatarName} — clique pra ver nome e número`} onClick={(e) => !m.fromMe && isGroup && personMenu(e, { id: avatarId, name: avatarName })}>
                 <Avatar id={avatarId} name={avatarName} size={30} />
               </button>
             )}
@@ -465,7 +465,17 @@ export const Message = memo(function Message({ m, prev, isGroup, fresh, onOpenIm
         <div className="msg-col">
           {!grouped && (listMode || (isGroup && !m.fromMe)) && (
             <div className="sender" style={{ color: m.fromMe ? 'var(--accent)' : colorOf(m.sender ?? m.chatId) }}>
-              {m.fromMe ? 'Você' : isGroup ? m.senderName : chatName}
+              {!m.fromMe && isGroup && m.sender ? (
+                <button className="sender-name" title="Ver nome e número" onClick={(e) => personMenu(e, { id: m.sender!, name: m.senderName || '' })} onDoubleClick={(e) => e.stopPropagation()}>
+                  {m.senderName}
+                </button>
+              ) : m.fromMe ? (
+                'Você'
+              ) : isGroup ? (
+                m.senderName
+              ) : (
+                chatName
+              )}
               {listMode && <span className="sender-time">{timeOf(m.ts)}</span>}
             </div>
           )}

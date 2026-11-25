@@ -65,6 +65,21 @@ export interface UiMessage {
   editable?: boolean
 }
 
+/** who someone is, for the contact card (click a name/photo) */
+export interface PersonInfo {
+  id: string
+  /** what the app calls them */
+  name: string
+  /** name saved in your phone's contacts */
+  savedName?: string
+  /** the name they set for themselves */
+  pushName?: string
+  /** full number, formatted (+55 41 99876-5432) */
+  phone?: string
+  /** the same, digits only with + (what gets copied) */
+  phoneRaw?: string
+}
+
 export interface PollInfo {
   name: string
   /** more than one option can be picked */
@@ -366,6 +381,8 @@ export interface ZapApi {
   /** first frame of a video grabbed by the renderer (JPEG), kept as its preview picture */
   savePoster(chatId: string, msgId: string, jpeg: ArrayBuffer): void
   react(chatId: string, msgId: string, emoji: string): Promise<void>
+  /** name + full number of someone (resolves WhatsApp's hidden ids to the real number when possible) */
+  person(id: string, pushName?: string): Promise<PersonInfo>
   /** your own text message, new text */
   editMessage(chatId: string, msgId: string, text: string): Promise<void>
   /** options = indexes picked (empty = take your vote back) */

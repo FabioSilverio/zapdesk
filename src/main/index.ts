@@ -932,6 +932,7 @@ function registerIpc() {
     return r.filePath
   })
   ipcMain.handle('react', (_e, chatId: string, msgId: string, emoji: string) => wa.react(chatId, msgId, emoji))
+  ipcMain.handle('person', (_e, id: string, pushName?: string) => wa.person(id, pushName))
   ipcMain.handle('editMessage', (_e, chatId: string, msgId: string, text: string) => wa.editMessage(chatId, msgId, text))
   ipcMain.handle('votePoll', (_e, chatId: string, msgId: string, options: number[]) => wa.votePoll(chatId, msgId, options))
   ipcMain.handle('sendPoll', (_e, chatId: string, name: string, options: string[], multi: boolean) => wa.sendPoll(chatId, name, options, multi))

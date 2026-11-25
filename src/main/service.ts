@@ -1,6 +1,6 @@
 // What the app needs from a messaging account. WhatsApp (wa.ts) and Telegram (tg.ts) both implement it,
 // so everything above them (window, notifications, lock, renderer) doesn't care which one it is.
-import type { AccountKind, ChatAction, ConnState, FavSticker, Folder, Reminder, ScheduledMsg, SharedItems, UiChat, UiMessage } from '@shared/types'
+import type { AccountKind, ChatAction, ConnState, FavSticker, Folder, PersonInfo, Reminder, ScheduledMsg, SharedItems, UiChat, UiMessage } from '@shared/types'
 import type { ChatRec } from './store'
 
 export type { AccountKind }
@@ -50,6 +50,7 @@ export interface ChatService {
   resend(chatId: string, msgId: string): Promise<void>
   react(chatId: string, msgId: string, emoji: string): Promise<void>
   editMessage(chatId: string, msgId: string, text: string): Promise<void>
+  person(id: string, pushName?: string): Promise<PersonInfo>
   votePoll(chatId: string, msgId: string, options: number[]): Promise<void>
   sendPoll(chatId: string, name: string, options: string[], multi: boolean): Promise<void>
   read(chatId: string, force?: boolean): Promise<void>

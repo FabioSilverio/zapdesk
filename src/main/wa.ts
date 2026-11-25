@@ -30,7 +30,7 @@ import makeWASocket, {
   type WAMessageKey,
   type WASocket
 } from 'baileys'
-import type { ChatAction, ConnState, FavSticker, MainEvent, Reminder, ScheduledMsg, SharedItems, SharedLink, UiChat, UiMessage } from '@shared/types'
+import type { ChatAction, ConnState, FavSticker, MainEvent, PersonInfo, Reminder, ScheduledMsg, SharedItems, SharedLink, UiChat, UiMessage } from '@shared/types'
 import { Store, tsOf, type ChatRec, type StickerRec } from './store'
 import { contentOf, encryptPollVote, extractUrls, isCiphertext, isInvisible, isRevokeStub, pollCreationOf, pollOptionHash, previewOf, putPollVote, stickerIdOf, stubTextOf, toUi, unwrapEdit, voicePreview } from './normalize'
 import { getLinkMeta } from './links'
@@ -1594,6 +1594,28 @@ export class WaService implements ChatService {
       this.store.markMeta()
     }
     await this.sendContent(chatId, { sticker: fs.readFileSync(file) } as AnyMessageContent)
+  }
+
+  /** contact card: the hidden id (LID) becomes the real number when WhatsApp knows it */
+  async person(raw: string, pushName?: string): Promise<PersonInfo> {
+    let id = this.canon(raw)
+    if (id.endsWith('@lid') && this.sock) {
+      const pn = await (this.sock as any).signalRepository?.lidMapping?.getPNForLID?.(id).catch(() => null)
+      if (pn) {
+        this.mapLid(id, pn)
+        id = this.canon(id)
+      }
+    }
+    const c = this.store.contacts.get(id) ?? this.store.contacts.get(raw)
+    const digits = id.endsWith('@s.whatsapp.net') ? id.split('@')[0].split(':')[0] : c?.phoneNumber?.replace(/\D/g, '')
+    return {
+      id,
+      name: this.name(id, pushName),
+      savedName: c?.name || c?.verifiedName || undefined,
+      pushName: c?.notify || pushName || undefined,
+      phone: digits ? formatPhone(digits + '@s.whatsapp.net') : undefined,
+      phoneRaw: digits ? '+' + digits : undefined
+    }
   }
 
   /** changes the text of a message you sent (WhatsApp allows 15 minutes) */

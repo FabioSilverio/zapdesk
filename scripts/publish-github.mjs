@@ -11,7 +11,8 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const v = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).version
 const fonts = path.join(root, 'src', 'renderer', 'src', 'assets', 'fonts')
 const aside = path.join(os.tmpdir(), 'zapdesk-sf-fonts-' + process.pid)
-const run = (cmd, args) => execFileSync(cmd, args, { cwd: root, stdio: 'inherit', shell: process.platform === 'win32' })
+// npm is a .cmd on Windows (needs a shell); gh is a real exe and must NOT go through one (spaces in args)
+const run = (cmd, args, shell = false) => execFileSync(cmd, args, { cwd: root, stdio: 'inherit', shell })
 
 const notes = (process.argv.slice(2).join(' ') || '').split('|').map((s) => s.trim()).filter(Boolean)
 const body = [
@@ -26,7 +27,7 @@ const moved = fs.existsSync(fonts)
 if (moved) fs.renameSync(fonts, aside)
 let setup, portable
 try {
-  run('npm', ['run', 'dist'])
+  run('npm', ['run', 'dist'], process.platform === 'win32')
   const out = path.join(os.tmpdir(), 'zapdesk-gh-' + v)
   fs.rmSync(out, { recursive: true, force: true })
   fs.mkdirSync(out, { recursive: true })

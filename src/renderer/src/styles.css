@@ -1106,11 +1106,14 @@ kbd {
   right: 10px;
   transform-origin: bottom right;
 }
-.msg:hover .hover-bar {
+/* only when the pointer is on the message itself (the bubble, or the bar sitting on it) — not the empty
+   rest of the row; lista mode has no bubbles, so there the whole row counts */
+.msg-line:hover .hover-bar,
+:root[data-messages='lista'] .msg:hover .hover-bar {
   opacity: 1;
   transform: none;
   pointer-events: auto;
-  transition-delay: 0.06s;
+  transition-delay: 0.1s;
 }
 .hb-sep {
   width: 1px;

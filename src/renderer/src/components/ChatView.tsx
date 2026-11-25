@@ -10,6 +10,7 @@ import { showMenu } from './overlays'
 import { chatMenu, toggleBlock } from './Sidebar'
 import { Back, BlockIcon, Check, Clock, Doc, Down, More, Paperclip, Pencil, PhotoIcon, PinIcon, PollIcon, Send, Smile, StickerIcon, X } from './icons'
 import { PollDialog } from './Poll'
+import { personMenu } from './People'
 import { fmtWhen, pickCustomTime, timeChoices } from '../tools'
 import { firstUrl, hasFormatting, richBlocks } from '../format'
 import { useLinkMeta } from './Links'
@@ -657,8 +658,13 @@ export function ChatView({ chat, narrow }: { chat: UiChat; narrow: boolean }) {
         )}
         <div
           className={'chat-title no-drag clickable' + (mediaOpen ? ' on' : '')}
-          title="Ver mídias, links e docs"
-          onClick={() => setState((s) => ({ mediaOpen: !s.mediaOpen }))}
+          title={chat.isGroup ? 'Ver mídias, links e docs' : 'Ver nome e número'}
+          onClick={(e) => {
+            // 1:1: the person's card (name + full number to copy); groups: media/links/docs
+            if (chat.isGroup) return setState((s) => ({ mediaOpen: !s.mediaOpen }))
+            const r = e.currentTarget.getBoundingClientRect()
+            personMenu({ clientX: r.left + r.width / 2 - 140, clientY: r.bottom + 2 }, { id: chat.id, name: chat.name }, { header: true })
+          }}
           onContextMenu={(e) => showMenu(e, chatMenu(chat))}
         >
           <Avatar id={chat.id} name={chat.name} size={26} />

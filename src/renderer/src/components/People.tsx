@@ -4,7 +4,7 @@ import { AnimatePresence, motion } from 'motion/react'
 import type { PersonInfo, UiMessage } from '@shared/types'
 import { getState, openChat, setState, toast, zap } from '../state'
 import { Avatar } from './Avatar'
-import { Check, Copy, Eye, Reply } from './icons'
+import { Check, Copy, PhotoIcon, Reply } from './icons'
 
 export const MentionCtx = createContext<UiMessage['mentions']>(undefined)
 
@@ -32,21 +32,26 @@ export async function openPerson(id: string, name?: string) {
 }
 
 // ---------- contact card: click a name/photo → name and full number, ready to copy ----------
-type CardReq = { x: number; y: number; id: string; name: string; key: number }
+type CardReq = { x: number; y: number; id: string; name: string; key: number; header?: boolean }
 let card: CardReq | null = null
 const subs = new Set<() => void>()
 const sub = (f: () => void) => {
   subs.add(f)
   return () => subs.delete(f)
 }
+/** the click that closes a card (mousedown outside) must not reopen it when it lands on the same name */
+let closed = { id: '', at: 0 }
 const setCard = (c: CardReq | null) => {
+  if (!c && card) closed = { id: card.id, at: Date.now() }
   card = c
   subs.forEach((f) => f())
 }
 
-export function personMenu(e: { clientX: number; clientY: number }, p: { id: string; name: string }) {
+/** header = opened from the chat's title (the card then also leads to the chat's media) */
+export function personMenu(e: { clientX: number; clientY: number }, p: { id: string; name: string }, opts?: { header?: boolean }) {
   if (!p.id || p.id.endsWith('@g.us')) return
-  setCard({ x: e.clientX, y: e.clientY, id: p.id, name: p.name, key: Date.now() })
+  if (closed.id === p.id && Date.now() - closed.at < 400) return // second click on the same name = close
+  setCard({ x: e.clientX, y: e.clientY, id: p.id, name: p.name, key: Date.now(), header: opts?.header })
 }
 
 function CopyRow({ label, value, copy, big }: { label: string; value: string; copy: string; big?: boolean }) {
@@ -154,15 +159,27 @@ function PersonCard({ c }: { c: CardReq }) {
         >
           <Copy size={14} /> Copiar tudo
         </button>
-        <button
-          className="btn primary sm"
-          onClick={() => {
-            close()
-            void openPerson(id, name)
-          }}
-        >
-          <Reply size={14} /> Conversar
-        </button>
+        {c.header ? (
+          <button
+            className="btn primary sm"
+            onClick={() => {
+              close()
+              setState({ mediaOpen: true })
+            }}
+          >
+            <PhotoIcon size={14} /> Mídias
+          </button>
+        ) : (
+          <button
+            className="btn primary sm"
+            onClick={() => {
+              close()
+              void openPerson(id, name)
+            }}
+          >
+            <Reply size={14} /> Conversar
+          </button>
+        )}
       </div>
     </motion.div>
   )

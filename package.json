@@ -1,6 +1,6 @@
 {
   "name": "zapdesk",
-  "version": "1.2.20",
+  "version": "1.2.21",
   "description": "Cliente WhatsApp compacto pra Windows",
   "main": "out/main/index.js",
   "scripts": {

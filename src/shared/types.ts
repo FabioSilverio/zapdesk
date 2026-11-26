@@ -321,7 +321,7 @@ export type MainEvent =
   | { type: 'lock'; locked: boolean }
   | { type: 'openChat'; chatId: string }
   | { type: 'toast'; text: string }
-  | { type: 'sync'; progress: number | null; done: boolean }
+  | { type: 'sync'; progress: number | null; done: boolean; label?: string }
   | { type: 'settings'; settings: Settings }
   | { type: 'scheduled'; scheduled: ScheduledMsg[]; reminders: Reminder[] }
   | { type: 'accounts'; accounts: AccountSummary[] }

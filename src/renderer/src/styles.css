@@ -335,6 +335,14 @@ kbd {
   background: #f5b31b;
   animation: pulse 1.2s ease-in-out infinite;
 }
+.sync-label {
+  margin: 2px 12px 4px;
+  font-size: 11.5px;
+  color: var(--text-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .sync-bar {
   height: 2px;
   margin: 0 12px 6px;

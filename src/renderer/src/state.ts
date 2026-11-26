@@ -32,7 +32,7 @@ export interface State {
   threads: Record<string, Thread>
   typing: Record<string, { who?: string; until: number }>
   fresh: Set<string>
-  sync: { progress: number | null; done: boolean }
+  sync: { progress: number | null; done: boolean; label?: string }
   toast?: { text: string; id: number }
   replyTo?: UiMessage
   /** your message being edited in the composer */
@@ -286,7 +286,7 @@ export function handleEvent(ev: MainEvent) {
       // WhatsApp doesn't always say "done": treat 20s of silence as finished
       clearTimeout(syncTimer)
       if (!ev.done) syncTimer = setTimeout(() => setState({ sync: { progress: 100, done: true } }), 20_000)
-      setState({ sync: { progress: ev.progress, done: ev.done } })
+      setState({ sync: { progress: ev.progress, done: ev.done, label: ev.label } })
       break
   }
 }

@@ -413,6 +413,19 @@ function createWindow(show: boolean) {
     wa.focused = false
     void wa.setOnline(false)
   })
+  // Windows shutting down / restarting: "close to tray" must not hold the window open, and whatever is still
+  // in memory (messages that just arrived) is written now; Windows kills the process right after this
+  win.on('query-session-end', () => {
+    quitting = true
+    // shutdown cancelled: closing the window goes back to hiding it in the tray
+    setTimeout(() => {
+      if (!saved) quitting = false
+    }, 20_000)
+  })
+  win.on('session-end', () => {
+    saveAll()
+    app.quit()
+  })
   win.on('close', (e) => {
     if (win) fs.writeFileSync(boundsFile, JSON.stringify(win.getNormalBounds()))
     if (!quitting && config.meta.settings.closeToTray) {
@@ -1030,8 +1043,12 @@ function mimeFromName(p: string) {
 // ---------- lifecycle ----------
 
 app.on('second-instance', showWindow)
-app.on('before-quit', () => {
+/** writes everything to disk and closes the sockets (quitting, or Windows shutting down) */
+let saved = false
+function saveAll() {
   quitting = true
+  if (saved) return
+  saved = true
   for (const a of live.values()) {
     try {
       a.wa.shutdown()
@@ -1041,7 +1058,8 @@ app.on('before-quit', () => {
   }
   config.flush()
   lock.dispose()
-})
+}
+app.on('before-quit', saveAll)
 app.on('window-all-closed', () => {
   if (!config.meta.settings.closeToTray) app.quit()
 })
@@ -1128,6 +1146,30 @@ app.whenReady().then(() => {
         setTimeout(() => step('read1of2', '5511911110001@s.whatsapp.net', 'readTimestamp'), 1000)
         setTimeout(() => step('readAll', '5511911110002@s.whatsapp.net', 'readTimestamp'), 1500)
       }, 3000)
+    // dev-only (ZAP_CATCHUPTEST): back after a day off — 300 waiting messages trickle in, the list shows the count
+    if (process.env.ZAP_CATCHUPTEST)
+      setTimeout(async () => {
+        const w = wa as any
+        const ids = [...w.store.chats.keys()].slice(0, 6)
+        w.startCatchup({ content: [{ tag: 'offline_preview', attrs: { message: '300' } }] })
+        const t0 = Math.floor(Date.now() / 1000) - 86400
+        for (let i = 0; i < 300; i += 20) {
+          const msgs = Array.from({ length: 20 }, (_, j) => {
+            const n = i + j
+            const chat = ids[n % ids.length]
+            const group = chat.endsWith('@g.us')
+            return {
+              key: { remoteJid: chat, id: 'CATCHUP' + n, fromMe: false, participant: group ? '5511911110001@s.whatsapp.net' : undefined },
+              messageTimestamp: t0 + n * 240,
+              pushName: 'Teste',
+              message: { conversation: 'mensagem de ontem ' + n }
+            }
+          })
+          await w.handleEvents({ 'messages.upsert': { type: 'append', messages: msgs } }, w.sock)
+          await new Promise((r) => setTimeout(r, 250))
+        }
+        w.catchupDelivered()
+      }, 2500)
     // dev-only: the phone reads a 1:1 chat and a group (read receipts from your own device)
     if (process.env.ZAP_READTEST)
       setTimeout(() => {

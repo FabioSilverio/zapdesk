@@ -626,9 +626,12 @@ export function Sidebar() {
         </div>
       )}
       {!sync.done && (
-        <div className="sync-bar" title="Sincronizando histórico">
-          <motion.i animate={{ width: `${Math.max(8, sync.progress ?? 30)}%` }} />
-        </div>
+        <>
+          {sync.label && <div className="sync-label">{sync.label}</div>}
+          <div className="sync-bar" title={sync.label ?? 'Sincronizando histórico'}>
+            <motion.i animate={{ width: `${Math.max(8, sync.progress ?? 30)}%` }} />
+          </div>
+        </>
       )}
 
       {!q && <FolderTabs />}

@@ -20,12 +20,13 @@ import makeWASocket, {
   isJidNewsletter,
   jidNormalizedUser,
   normalizeMessageContent,
+  makeCacheableSignalKeyStore,
   proto,
-  useMultiFileAuthState,
   type AnyMessageContent,
   type Chat,
   type Contact,
   type GroupMetadata,
+  type SignalKeyStore,
   type WAMessage,
   type WAMessageKey,
   type WASocket
@@ -34,6 +35,7 @@ import type { ChatAction, ConnState, FavSticker, MainEvent, PersonInfo, Reminder
 import { Store, tsOf, type ChatRec, type StickerRec } from './store'
 import { contentOf, encryptPollVote, extractUrls, isCiphertext, isInvisible, isRevokeStub, pollCreationOf, pollOptionHash, previewOf, putPollVote, stickerIdOf, stubTextOf, toUi, unwrapEdit, voicePreview } from './normalize'
 import { getLinkMeta } from './links'
+import { useAtomicAuthState } from './auth'
 
 const BATCH_MS = 40
 const PAGE = 60
@@ -107,6 +109,7 @@ export class WaService implements ChatService {
   private historyAsked = new Map<string, number>()
   private stopped = false
   private authDir: string
+  private keyCache?: SignalKeyStore
 
   constructor(
     private store: Store,
@@ -922,7 +925,13 @@ export class WaService implements ChatService {
   private async connectInner() {
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
     this.reconnectTimer = null
-    const { state, saveCreds } = await useMultiFileAuthState(this.authDir)
+    const disk = await useAtomicAuthState(this.authDir)
+    // keys in memory too: decrypting a day of messages read the same session files from disk thousands of
+    // times (catching up after the PC was off took minutes). Writes still go straight to disk. One cache for
+    // the whole run (reconnects reuse it); forgotten when the login is reset.
+    this.keyCache ??= makeCacheableSignalKeyStore(disk.state.keys)
+    const state = { creds: disk.state.creds, keys: this.keyCache }
+    const saveCreds = disk.saveCreds
     // WhatsApp now rejects "Desktop" companions (428) and stale protocol versions, so: Chrome + freshest version
     // reconnects reuse the version we already know: no network round-trip before reconnecting
     const latest = this.retry > 0 && this.store.meta.waVersion ? undefined : await fetchLatestBaileysVersion().catch(() => undefined)
@@ -950,6 +959,10 @@ export class WaService implements ChatService {
     // WhatsApp's own clock at login: a PC whose clock is off stamped what you sent in the past/future and it
     // landed above the messages you were answering (received ones carry the server's time)
     ;(sock.ws as any).on?.('CB:success', (node: any) => this.setServerTime(Number(node?.attrs?.t)))
+    // after hours/days off, WhatsApp first says how much is waiting, then delivers it one by one (slow):
+    // show "Recebendo mensagens… 340 de 1200" instead of a frozen-looking list
+    ;(sock.ws as any).on?.('CB:ib,,offline_preview', (node: any) => sock === this.sock && this.safe(() => this.startCatchup(node)))
+    ;(sock.ws as any).on?.('CB:ib,,offline', () => sock === this.sock && this.safe(() => this.catchupDelivered()))
     // Archive/mute/pin flags of the first app-state sync (and resyncs) come as "conditional" chat updates that
     // Baileys keeps buffered forever when the chat isn't in the same history batch. Catch them at the source.
     const rawEmit = sock.ev.emit.bind(sock.ev)
@@ -1029,6 +1042,7 @@ export class WaService implements ChatService {
       }
       const up = events['messages.upsert']
       if (up) for (const m of up.messages) this.safe(() => this.ingest(m, up.type === 'notify' ? 'notify' : 'append'))
+      if (up && up.type !== 'notify' && this.catchup) this.catchupGot(up.messages.length)
       const readByChat = new Map<string, string[]>()
       const readHere = (chatId: string, id: string) => readByChat.set(chatId, [...(readByChat.get(chatId) ?? []), id])
       if (events['messages.update']) {
@@ -1127,6 +1141,64 @@ export class WaService implements ChatService {
     }
   }
 
+  // ---------- catching up after being offline ----------
+
+  private catchup?: { total: number; got: number; delivered: boolean; last: number; shown: number; timer?: NodeJS.Timeout }
+
+  private startCatchup(node: any) {
+    const child = Array.isArray(node?.content) ? node.content.find((c: any) => c?.tag === 'offline_preview') : undefined
+    const a = child?.attrs ?? node?.attrs ?? {}
+    const total = Number(a.message) || 0
+    this.endCatchup()
+    // a handful of messages arrives in a blink: no bar for that
+    if (total < 40) return
+    this.catchup = { total, got: 0, delivered: false, last: Date.now(), shown: 0 }
+    this.catchupTick()
+  }
+
+  private catchupGot(n: number) {
+    const c = this.catchup!
+    c.got += n
+    c.last = Date.now()
+    if (Date.now() - c.shown > 300) this.catchupTick()
+  }
+
+  /** WhatsApp sent everything (Baileys may still be decrypting the tail) */
+  private catchupDelivered() {
+    if (this.catchup) this.catchup.delivered = true
+  }
+
+  private catchupTick() {
+    const c = this.catchup
+    if (!c) return
+    if (c.timer) clearTimeout(c.timer)
+    const idle = Date.now() - c.last
+    // finished: all counted, or delivered and quiet for a bit, or nothing at all for a long while
+    if (c.got >= c.total || (c.delivered && idle > 4000) || idle > 30_000) return this.endCatchup()
+    c.shown = Date.now()
+    const got = Math.min(c.got, c.total)
+    this.emit({
+      type: 'sync',
+      progress: Math.max(3, Math.min(99, (got / c.total) * 100)),
+      done: false,
+      label: `Recebendo mensagens · ${got.toLocaleString('pt-BR')} de ${c.total.toLocaleString('pt-BR')}`
+    })
+    c.timer = setTimeout(() => this.catchupTick(), 1000)
+  }
+
+  private stopCatchupTimer() {
+    if (this.catchup?.timer) clearTimeout(this.catchup.timer)
+    this.catchup = undefined
+  }
+
+  private endCatchup() {
+    const c = this.catchup
+    if (!c) return
+    if (c.timer) clearTimeout(c.timer)
+    this.catchup = undefined
+    this.emit({ type: 'sync', progress: 100, done: true })
+  }
+
   /** a connection stuck in "connecting" (half-open socket, sleep/wake, VPN switch) gets kicked */
   private watchdog() {
     if (this.stopped) return
@@ -1145,6 +1217,7 @@ export class WaService implements ChatService {
   /** account removed: stop everything, keep files untouched until the caller deletes them */
   async destroy(logout: boolean) {
     this.stopped = true
+    this.stopCatchupTimer()
     if (this.timer) clearInterval(this.timer)
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
     for (const t of this.markReadTimers.values()) clearTimeout(t)
@@ -1196,6 +1269,7 @@ export class WaService implements ChatService {
         .catch(() => {})
     }
     if (cu.connection === 'close') {
+      this.endCatchup()
       const code = (cu.lastDisconnect?.error as any)?.output?.statusCode
       if (process.env.ZAP_DEBUG) console.error('[wa] closed', code, cu.lastDisconnect?.error?.message)
       if (this.stopped) return
@@ -1224,6 +1298,7 @@ export class WaService implements ChatService {
     } catch {}
     this.sock = undefined
     this.me = undefined
+    this.keyCache = undefined
     fs.rmSync(this.authDir, { recursive: true, force: true })
     this.store.wipe()
     this.loaded.clear()
@@ -1256,6 +1331,7 @@ export class WaService implements ChatService {
 
   shutdown() {
     this.stopped = true
+    this.stopCatchupTimer()
     for (const t of this.markReadTimers.values()) clearTimeout(t)
     this.markReadTimers.clear()
     this.store.flush()

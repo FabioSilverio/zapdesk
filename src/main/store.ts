@@ -225,8 +225,51 @@ export class Store {
     this.chats.delete(chatId)
     this.buckets.delete(chatId)
     this.dirtyChats.delete(chatId)
-    fs.rmSync(path.join(this.dir, 'msgs', safeName(chatId) + '.json'), { force: true })
+    this.writtenAt.delete(chatId)
+    const f = path.join(this.dir, 'msgs', safeName(chatId) + '.json')
+    fs.rmSync(f, { force: true })
+    fs.rmSync(f + '.bak', { force: true })
     this.markList()
+  }
+
+  /** moves every message + reaction from `from` into `to`, writing `to` atomically before `from` can be removed */
+  mergeBucket(from: string, to: string): { moved: WAMessage[]; all: WAMessage[] } {
+    if (!from || !to || from === to) return { moved: [], all: [] }
+    const fromFile = path.join(this.dir, 'msgs', safeName(from) + '.json')
+    const hasFrom = this.buckets.has(from) || fs.existsSync(fromFile)
+    if (!hasFrom) return { moved: [], all: [] }
+    const fb = this.bucket(from)
+    if (!fb.msgs.size && !fb.reactions.size) {
+      this.buckets.delete(from)
+      this.dirtyChats.delete(from)
+      fs.rmSync(fromFile, { force: true })
+      fs.rmSync(fromFile + '.bak', { force: true })
+      return { moved: [], all: [] }
+    }
+    const wasToLoaded = this.buckets.has(to)
+    const tb = this.bucket(to)
+    const moved: WAMessage[] = []
+    for (const m of fb.msgs.values()) {
+      this.putMessage(to, m)
+      moved.push(tb.msgs.get(m.key.id!)!)
+    }
+    for (const [msgId, reacts] of fb.reactions) {
+      tb.reactions.set(msgId, { ...reacts, ...(tb.reactions.get(msgId) ?? {}) })
+    }
+    let list = this.sorted(to)
+    if (list.length > MAX_PER_CHAT) {
+      list = list.slice(-MAX_PER_CHAT)
+      tb.msgs = new Map(list.map((m) => [m.key.id!, m]))
+      tb.sorted = list
+    }
+    writeAtomic(path.join(this.dir, 'msgs', safeName(to) + '.json'), {
+      m: list,
+      r: Object.fromEntries(tb.reactions)
+    })
+    this.dirtyChats.delete(to)
+    this.writtenAt.set(to, Date.now())
+    if (!wasToLoaded && !this.keep.has(to) && this.buckets.size > MAX_LOADED) this.buckets.delete(to)
+    return { moved, all: list }
   }
 
   bucket(chatId: string): Bucket {

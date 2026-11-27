@@ -54,7 +54,10 @@ async function readJsonFile(file: string): Promise<any> {
   return null
 }
 
-export async function useAtomicAuthState(folder: string): Promise<{ state: { creds: AuthenticationCreds; keys: SignalKeyStore }; saveCreds: () => Promise<void> }> {
+export async function useAtomicAuthState(
+  folder: string,
+  onLidMapping?: (lid: string, pn: string) => void
+): Promise<{ state: { creds: AuthenticationCreds; keys: SignalKeyStore }; saveCreds: () => Promise<void> }> {
   await fs.mkdir(folder, { recursive: true })
   const at = (name: string) => path.join(folder, fixFileName(name))
   const write = (data: unknown, name: string) => {
@@ -93,6 +96,11 @@ export async function useAtomicAuthState(folder: string): Promise<{ state: { cre
               const value = data[category][id]
               const name = `${category}-${id}.json`
               tasks.push(value ? write(value, name) : remove(name))
+              if (category === 'lid-mapping' && typeof value === 'string' && value && onLidMapping) {
+                const rawVal = value.replace(/@.*$/, '')
+                if (id.endsWith('_reverse')) onLidMapping(id.slice(0, -8).replace(/@.*$/, '') + '@lid', rawVal + '@s.whatsapp.net')
+                else onLidMapping(rawVal + '@lid', id.replace(/@.*$/, '') + '@s.whatsapp.net')
+              }
             }
           }
           await Promise.all(tasks)

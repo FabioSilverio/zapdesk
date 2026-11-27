@@ -117,17 +117,171 @@ export class WaService implements ChatService {
     private emit: Emit
   ) {
     this.authDir = path.join(dataDir, 'auth')
+    this.dedupeLidChats(true)
   }
 
   // ---------- identity helpers ----------
 
-  private mapLid(lid?: string | null, pn?: string | null) {
-    if (!lid || !pn || !lid.endsWith('@lid') || !pn.endsWith('@s.whatsapp.net')) return
-    const l = jidNormalizedUser(lid)
-    const p = jidNormalizedUser(pn)
-    if (this.store.meta.lidToPn[l] === p) return
-    this.store.meta.lidToPn[l] = p
-    this.store.markMeta()
+  private mapLid(a?: string | null, b?: string | null) {
+    if (!a || !b) return
+    const na = jidNormalizedUser(a)
+    const nb = jidNormalizedUser(b)
+    let l = ''
+    let p = ''
+    if (na.endsWith('@lid') && nb.endsWith('@s.whatsapp.net')) {
+      l = na
+      p = nb
+    } else if (nb.endsWith('@lid') && na.endsWith('@s.whatsapp.net')) {
+      l = nb
+      p = na
+    } else return
+    if (this.store.meta.lidToPn[l] !== p) {
+      this.store.meta.lidToPn[l] = p
+      this.store.markMeta()
+    }
+    if (this.store.contacts.has(l)) this.mergeContact(l, p)
+    if (this.store.chats.has(l)) this.mergeChat(l, p)
+  }
+
+  /** pulls any LID→PN pairs Baileys already stored in auth/ and collapses duplicate @lid chats + contacts into their PN */
+  private dedupeLidChats(silent = false) {
+    const lidIds = new Set<string>()
+    for (const id of this.store.chats.keys()) if (id.endsWith('@lid')) lidIds.add(id)
+    for (const id of this.store.contacts.keys()) if (id.endsWith('@lid')) lidIds.add(id)
+    let learned = false
+    for (const id of lidIds) {
+      if (this.store.meta.lidToPn[id]) continue
+      const num = id.slice(0, -4)
+      const file = path.join(this.authDir, `lid-mapping-${num}_reverse.json`)
+      try {
+        if (!fs.existsSync(file)) continue
+        const raw = JSON.parse(fs.readFileSync(file, 'utf8'))
+        if (typeof raw === 'string' && raw) {
+          const pn = jidNormalizedUser(raw.includes('@') ? raw : raw + '@s.whatsapp.net')
+          if (pn.endsWith('@s.whatsapp.net')) {
+            this.store.meta.lidToPn[id] = pn
+            learned = true
+          }
+        }
+      } catch {}
+    }
+    if (learned) this.store.markMeta()
+    for (const id of [...this.store.contacts.keys()]) {
+      if (!id.endsWith('@lid')) continue
+      const pn = this.store.meta.lidToPn[id]
+      if (pn && pn !== id) this.mergeContact(id, pn)
+    }
+    for (const id of [...this.store.chats.keys()]) {
+      if (!id.endsWith('@lid')) continue
+      const pn = this.store.meta.lidToPn[id]
+      if (pn && pn !== id) this.mergeChat(id, pn, silent)
+    }
+  }
+
+  private mergeContact(from: string, to: string) {
+    const a = this.store.contacts.get(from)
+    if (!a || from === to) return
+    const b = this.store.contacts.get(to) ?? { id: to }
+    this.store.contacts.set(to, {
+      ...b,
+      name: b.name ?? a.name,
+      notify: b.notify ?? a.notify,
+      verifiedName: b.verifiedName ?? a.verifiedName,
+      phoneNumber: b.phoneNumber ?? a.phoneNumber
+    })
+    this.store.contacts.delete(from)
+    this.store.markList()
+    if (this.store.chats.has(to)) this.pendingChats.add(to)
+  }
+
+  /** collapses a duplicate chat (e.g. @lid once its phone number is learned) into its canonical chat without losing history */
+  private mergeChat(from: string, to: string, silent = false) {
+    if (!from || !to || from === to || this.skip(to)) return
+    const fromRec = this.store.chats.get(from)
+    if (!fromRec) return
+    const hadTo = this.store.chats.has(to)
+    const toRec = this.chat(to)
+    const fromNewer = fromRec.ts > toRec.ts
+    if (fromRec.name && !toRec.name) toRec.name = fromRec.name
+    if (fromRec.alias && !toRec.alias) toRec.alias = fromRec.alias
+    if (fromRec.section && !toRec.section) toRec.section = fromRec.section
+    if (fromRec.localPin && !toRec.localPin) toRec.localPin = fromRec.localPin
+    if (fromRec.waPinned && !toRec.waPinned) toRec.waPinned = fromRec.waPinned
+    if (!hadTo) toRec.archived = fromRec.archived
+    else if (fromNewer && fromRec.archived !== undefined) toRec.archived = fromRec.archived
+    if (!isMuted(toRec) && isMuted(fromRec)) toRec.muteUntil = fromRec.muteUntil
+    if (fromRec.markedUnread) toRec.markedUnread = true
+    toRec.unread = hadTo ? Math.max(toRec.unread || 0, fromRec.unread || 0) : fromRec.unread || 0
+    if ((fromNewer || !toRec.preview) && fromRec.preview) {
+      toRec.preview = fromRec.preview
+      toRec.previewFromMe = fromRec.previewFromMe
+      toRec.previewSender = fromRec.previewSender
+      toRec.lastMsgId = fromRec.lastMsgId
+    }
+    toRec.ts = Math.max(toRec.ts, fromRec.ts)
+
+    const { moved, all } = this.store.mergeBucket(from, to)
+    let metaChanged = false
+    for (const s of this.store.meta.scheduled) {
+      if (s.chatId === from) {
+        s.chatId = to
+        metaChanged = true
+      }
+    }
+    for (const r of this.store.meta.reminders) {
+      if (r.chatId === from) {
+        r.chatId = to
+        metaChanged = true
+      }
+    }
+    if (metaChanged) {
+      this.store.markMeta()
+      if (!silent) this.emitScheduled()
+    }
+
+    if (this.blocked.delete(from)) this.blocked.add(to)
+    const held = this.heldReads.get(from)
+    if (held) {
+      this.heldReads.delete(from)
+      this.heldReads.set(to, (this.heldReads.get(to) ?? 0) + held)
+    }
+    const pend = this.pendingReads.get(from)
+    if (pend) {
+      this.pendingReads.delete(from)
+      this.pendingReads.set(to, Math.max(this.pendingReads.get(to) ?? 0, pend))
+    }
+    const mt = this.markReadTimers.get(from)
+    if (mt) {
+      clearTimeout(mt)
+      this.markReadTimers.delete(from)
+    }
+    const wasLoaded = this.loaded.delete(from)
+    if (wasLoaded) this.loaded.add(to)
+    this.pendingChats.delete(from)
+    this.pendingMsgs.delete(from)
+
+    this.store.removeChat(from)
+
+    if (moved.length) {
+      let latest: WAMessage | undefined
+      for (let i = all.length - 1; i >= 0; i--) {
+        if (!isInvisible(all[i])) {
+          latest = all[i]
+          break
+        }
+      }
+      if (latest && (tsOf(latest) >= toRec.ts || !toRec.preview)) this.setPreview(toRec, latest)
+    }
+
+    if (!silent) {
+      if (this.activeChat === from) {
+        this.activeChat = to
+        this.emit({ type: 'openChat', chatId: to })
+      }
+      if (this.loaded.has(to)) for (const m of moved) this.queueMsg(to, m)
+      this.emit({ type: 'chatsRemoved', ids: [from] })
+      this.queueChat(to)
+    }
   }
 
   canon(jid?: string | null): string {
@@ -925,7 +1079,7 @@ export class WaService implements ChatService {
   private async connectInner() {
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
     this.reconnectTimer = null
-    const disk = await useAtomicAuthState(this.authDir)
+    const disk = await useAtomicAuthState(this.authDir, (lid, pn) => this.mapLid(lid, pn))
     // keys in memory too: decrypting a day of messages read the same session files from disk thousands of
     // times (catching up after the PC was off took minutes). Writes still go straight to disk. One cache for
     // the whole run (reconnects reuse it); forgotten when the login is reset.
@@ -1032,6 +1186,11 @@ export class WaService implements ChatService {
       if (events['lid-mapping.update']) this.mapLid(events['lid-mapping.update'].lid, events['lid-mapping.update'].pn)
       if (events['contacts.upsert']) this.upsertContacts(events['contacts.upsert'])
       if (events['contacts.update']) this.upsertContacts(events['contacts.update'])
+      // learn LID↔PN pairs carried by messages in this batch BEFORE chats.upsert/update can create a @lid duplicate
+      const up = events['messages.upsert']
+      if (up) for (const m of up.messages) if (m.key) this.chatIdOf(m.key)
+      if (events['messages.update']) for (const { key } of events['messages.update']) if (key) this.chatIdOf(key)
+      if (events['message-receipt.update']) for (const { key } of events['message-receipt.update']) if (key) this.chatIdOf(key)
       if (events['chats.upsert']) for (const c of events['chats.upsert']) this.applyChat(c)
       if (events['chats.update']) for (const c of events['chats.update']) this.applyChat(c as any, false, true)
       if (events['chats.delete']) {
@@ -1040,7 +1199,6 @@ export class WaService implements ChatService {
         this.store.markList()
         this.emit({ type: 'chatsRemoved', ids })
       }
-      const up = events['messages.upsert']
       if (up) for (const m of up.messages) this.safe(() => this.ingest(m, up.type === 'notify' ? 'notify' : 'append'))
       if (up && up.type !== 'notify' && this.catchup) this.catchupGot(up.messages.length)
       const readByChat = new Map<string, string[]>()
